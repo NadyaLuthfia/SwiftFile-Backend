@@ -5,33 +5,37 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use App\Models\DokumenCetak;
 use App\Models\Template;
+use App\Services\DocumentGeneratorService;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
 use Throwable;
 
 class ArsipController extends Controller
 {
+    protected $documentService;
+
+    public function __construct(DocumentGeneratorService $documentService)
+    {
+        $this->documentService = $documentService;
+    }
+
     /**
-     * 1. Mengambil data khusus untuk halaman Arsip & History (Hanya yang sudah bertanda tangan / selesai)
+     * 1. Menampilkan Daftar Dokumen Arsip
      */
     public function index(Request $request)
     {
         try {
-            $user = $request->user(); // 🔐 Ambil data user yang sedang login
+            $user = $request->user(); 
             
-            // ✨ Mengambil dokumen yang sudah di-upload foto TTD atau yang diselesaikan langsung ('tanpa_ttd')
             $query = DokumenCetak::whereNotNull('foto_ttd')
                 ->where('foto_ttd', '!=', '')
                 ->latest();
 
-            // 🔒 FILTER PRIVASI: Mengunci data milik sendiri atau data yang menunjuk dia sebagai penanggung jawab
             if ($user) {
                 $query->where(function($q) use ($user) {
-                    // Alur 1: Wajib miliknya sendiri berdasarkan ID
                     $q->where('user_id', $user->id);
-                    
-                    // Alur 2: ATAU namanya disebut spesifik di kolom variables JSON (Kebal huruf besar/kecil)
                     $identity = $user->name ?? $user->username ?? $user->nama ?? null;
                     if (!empty($identity)) {
                         $q->orWhereRaw("LOWER(variables) LIKE ?", ['%"nama_penanggung":"' . strtolower($identity) . '"%']);
@@ -39,35 +43,20 @@ class ArsipController extends Controller
                 });
             }
 
-            // ✨ VERSI STATUS_AKTIF: Membaca parameter ?status_aktif= dari Frontend (default: 1)
             $statusAktif = $request->query('status_aktif', 1);
             $query->where('status_aktif', $statusAktif);
 
-            $data = $query->get()->map(function($dokumen) {
-                $template = Template::find($dokumen->template_id);
-                $namaTemplate = $template ? $template->nama : 'Dokumen';
+            $dokumenList = $query->get();
 
-                $vars = $dokumen->variables;
-                if (is_string($vars)) {
-                    $vars = json_decode($vars, true);
-                } else {
-                    $vars = (array)$vars;
-                }
-                $noUrut = $vars['no'] ?? '000';
-                $tahun = $dokumen->created_at ? $dokumen->created_at->format('Y') : date('Y');
-                $bulanAngka = $dokumen->created_at ? (int)$dokumen->created_at->format('n') : (int)date('n');
-                $romawiArr = [1=>'I', 2=>'II', 3=>'III', 4=>'IV', 5=>'V', 6=>'VI', 7=>'VII', 8=>'VIII', 9=>'IX', 10=>'X', 11=>'XI', 12=>'XII'];
-                $bulanRomawi = $romawiArr[$bulanAngka] ?? 'I';
+            $dokumenIds = $dokumenList->pluck('id');
+            $allItems = DB::table('dokumen_item')
+                ->whereIn('dokumen_id', $dokumenIds)
+                ->get()
+                ->groupBy('dokumen_id');
 
-                $namaOtomatis = "{$namaTemplate} - {$noUrut}/BTG-{$bulanRomawi}/BA/{$tahun}";
-                
-                $dokumen->nama_dokumen = $namaOtomatis;
-                $dokumen->nama_arsip_display = $namaOtomatis; 
-
-                $dokumen->items = DB::table('dokumen_item')
-                    ->where('dokumen_id', $dokumen->id)
-                    ->get();
-
+            $data = $dokumenList->map(function($dokumen) use ($allItems) {
+                $dokumen->nama_arsip_display = $dokumen->nama_dokumen; 
+                $dokumen->items = $allItems->get($dokumen->id, []);
                 return $dokumen;
             });
             
@@ -79,7 +68,7 @@ class ArsipController extends Controller
     }
 
     /**
-     * 2. PINDAHAN: Mengunggah foto tanda tangan bukti penyerahan fisik + join ke tabel utama
+     * 2. Upload Bukti TTD (Cetak Fisik Selesai via Upload)
      */
     public function uploadBukti(Request $request, $id)
     {
@@ -89,15 +78,6 @@ class ArsipController extends Controller
 
         if ($validator->fails()) {
             return response()->json(['status' => 'error', 'errors' => $validator->errors()], 422);
-        }
-
-        $karyawanId = DB::table('karyawan')->value('id');
-
-        if (!$karyawanId) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Gagal Simpan! Tabel [karyawan] kamu masih kosong.'
-            ], 422);
         }
 
         DB::beginTransaction();
@@ -116,67 +96,25 @@ class ArsipController extends Controller
                     File::delete(public_path($dokumenCetak->foto_ttd));
                 }
 
-                // Update foto_ttd saja tanpa kolom status
-                $dokumenCetak->update([
-                    'foto_ttd' => $pathFotoFinal,
-                ]);
-
-                $template = Template::find($dokumenCetak->template_id);
-                $namaTemplate = $template ? $template->nama : 'k';
-
-                $vars = $dokumenCetak->variables;
-                if (is_string($vars)) {
-                    $vars = json_decode($vars, true);
-                } else {
-                    $vars = (array)$vars;
+                // 🔑 Update tanggal_cetak di dokumen_cetak jika masih kosong
+                if (empty($dokumenCetak->tanggal_cetak)) {
+                    $dokumenCetak->tanggal_cetak = now();
                 }
-                $noUrut = $vars['no'] ?? '000';
-                $tahun = $dokumenCetak->created_at ? $dokumenCetak->created_at->format('Y') : date('Y');
-                $bulanAngka = $dokumenCetak->created_at ? (int)$dokumenCetak->created_at->format('n') : (int)date('n');
-                
-                $romawiArr = [1=>'I', 2=>'II', 3=>'III', 4=>'IV', 5=>'V', 6=>'VI', 7=>'VII', 8=>'VIII', 9=>'IX', 10=>'X', 11=>'XI', 12=>'XII'];
-                $bulanRomawi = $romawiArr[$bulanAngka] ?? 'I';
 
-                $namaOtomatis = "{$namaTemplate} - {$noUrut}/BTG-{$bulanRomawi}/BA/{$tahun}";
+                $dokumenCetak->foto_ttd = $pathFotoFinal;
+                $dokumenCetak->save(); // Simpan tanggal_cetak & foto_ttd ke DB
 
-                $isSuratTugas = $dokumenCetak->template_id == 3 || str_contains(strtolower($namaTemplate), 'surat tugas');
-
-                $dataInsert = [
-                    'template_id'      => $dokumenCetak->template_id,
-                    'user_id'          => auth()->id() ?? 3, 
-                    'jenis_dokumen_id' => $template->jenis_dokumen_id ?? 1, 
-                    'nomor_dokumen'    => $namaOtomatis,                  
-                    'status'           => 'arsip',           
-                    'tanggal_dokumen'  => $dokumenCetak->created_at ?? now(),
-                    'penyerah_id'      => $karyawanId,                 
-                    'penerima_id'      => $karyawanId,                 
-                    'opsi_foto'        => 1,                 
-                    'kolom_tambahan'   => json_encode($vars),             
-                    'file_sblm_print'  => $dokumenCetak->file_path,
-                    'file_sesudah_ttd' => $pathFotoFinal,                                               
-                    'created_at'       => now(),
-                    'updated_at'       => now(),
-                ];
-
-                if ($isSuratTugas) {
-                    $dataInsert['jenis'] = 'surat_tugas';
-                    DB::table('dokumen')->insert($dataInsert);
-                } else {
-                    $jenisEnum = 'penyerahan';
-                    if (str_contains(strtolower($namaTemplate), 'kerusakan') || strtolower($namaTemplate) == 'BA Kerusakan') {
-                        $jenisEnum = 'kerusakan';
-                    }
-                    $dataInsert['jenis']   = $jenisEnum;
-                    DB::table('dokumen')->insert($dataInsert);
-                }
+                // Pindahkan & simpan tanggal_cetak ke tabel induk 'dokumen'
+                $this->simpanKeMasterDokumen($dokumenCetak, $pathFotoFinal, 1, false);
             }
 
             DB::commit();
 
             return response()->json([
                 'status' => 'success', 
-                'message' => 'Hore! Data berhasil masuk ke tabel dokumen!',
-                'path' => $pathFotoFinal ?? null
+                'message' => 'Hore! Bukti TTD berhasil diupload dan data masuk ke master dokumen!',
+                'path' => $pathFotoFinal ?? null,
+                'tanggal_cetak' => $dokumenCetak->tanggal_cetak
             ], 200);
             
         } catch (Throwable $e) {
@@ -186,85 +124,45 @@ class ArsipController extends Controller
     }
 
     /**
-     * ✨ 3. FITUR BARU: Selesai langsung khusus Surat Tugas (Tanpa upload foto) ✨
+     * 3. Selesai Direct (Khusus Surat Tugas & TOR)
      */
     public function selesaiSuratTugas($id)
     {
-        $karyawanId = DB::table('karyawan')->value('id');
-
-        if (!$karyawanId) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Gagal Simpan! Tabel [karyawan] kamu masih kosong.'
-            ], 422);
-        }
-
         DB::beginTransaction();
 
         try {
             $dokumenCetak = DokumenCetak::findOrFail($id);
-            $template = Template::find($dokumenCetak->template_id);
-            $namaTemplate = $template ? $template->nama : 'Surat Tugas';
+            $namaDokumenFinal = strtolower($dokumenCetak->nama_dokumen ?? '');
 
-            // Validasi pengaman: Pastikan memang benar ini dokumen Surat Tugas
-            $isSuratTugas = $dokumenCetak->template_id == 3 || str_contains(strtolower($namaTemplate), 'surat tugas');
-            if (!$isSuratTugas) {
+            // Pengecekan Surat Tugas & TOR
+            $isSuratTugas = $dokumenCetak->template_id == 3 || str_contains($namaDokumenFinal, 'surat tugas');
+            $isTor        = str_contains($namaDokumenFinal, 'tor');
+
+            if (!$isSuratTugas && !$isTor) {
                 return response()->json([
                     'status' => 'error',
-                    'message' => 'Gagal! Tombol selesai langsung hanya berlaku untuk dokumen Surat Tugas.'
+                    'message' => 'Gagal! Tombol selesai langsung hanya berlaku untuk dokumen Surat Tugas dan TOR.'
                 ], 400);
             }
 
-            // Gunakan string penanda khusus 'tanpa_ttd' agar lolos validasi list Arsip
-            $pathFotoFinal = 'tanpa_ttd';
-
-            // Update status foto_ttd di tabel dokumen_cetak
-            $dokumenCetak->update([
-                'foto_ttd' => $pathFotoFinal,
-            ]);
-
-            // Buat penamaan otomatis nomor dokumen
-            $vars = $dokumenCetak->variables;
-            if (is_string($vars)) {
-                $vars = json_decode($vars, true);
-            } else {
-                $vars = (array)$vars;
+            // 🔑 Update tanggal_cetak di dokumen_cetak jika masih kosong
+            if (empty($dokumenCetak->tanggal_cetak)) {
+                $dokumenCetak->tanggal_cetak = now();
             }
-            $noUrut = $vars['no'] ?? '000';
-            $tahun = $dokumenCetak->created_at ? $dokumenCetak->created_at->format('Y') : date('Y');
-            $bulanAngka = $dokumenCetak->created_at ? (int)$dokumenCetak->created_at->format('n') : (int)date('n');
-            
-            $romawiArr = [1=>'I', 2=>'II', 3=>'III', 4=>'IV', 5=>'V', 6=>'VI', 7=>'VII', 8=>'VIII', 9=>'IX', 10=>'X', 11=>'XI', 12=>'XII'];
-            $bulanRomawi = $romawiArr[$bulanAngka] ?? 'I';
 
-            $namaOtomatis = "{$namaTemplate} - {$noUrut}/BTG-{$bulanRomawi}/BA/{$tahun}";
+            $pathFotoFinal = 'tanpa_ttd';
+            $dokumenCetak->foto_ttd = $pathFotoFinal;
+            $dokumenCetak->save(); // Simpan tanggal_cetak & foto_ttd ke DB
 
-            // Daftarkan langsung ke tabel dokumen (Arsip Utama)
-            $dataInsert = [
-                'template_id'      => $dokumenCetak->template_id,
-                'user_id'          => auth()->id() ?? 3, 
-                'jenis_dokumen_id' => $template->jenis_dokumen_id ?? 1, 
-                'nomor_dokumen'    => $namaOtomatis,                  
-                'status'           => 'arsip',           
-                'tanggal_dokumen'  => $dokumenCetak->created_at ?? now(),
-                'penyerah_id'      => $karyawanId,                 
-                'penerima_id'      => $karyawanId,                 
-                'opsi_foto'        => 0, // 0 = Tanpa Bukti Foto Fisik                 
-                'kolom_tambahan'   => json_encode($vars),             
-                'file_sblm_print'  => $dokumenCetak->file_path,
-                'file_sesudah_ttd' => $pathFotoFinal, // Menyimpan teks 'tanpa_ttd'                                               
-                'jenis'            => 'surat_tugas',
-                'created_at'       => now(),
-                'updated_at'       => now(),
-            ];
-
-            DB::table('dokumen')->insert($dataInsert);
+            // Pindahkan & simpan tanggal_cetak ke tabel induk 'dokumen'
+            $this->simpanKeMasterDokumen($dokumenCetak, $pathFotoFinal, 0, $isSuratTugas);
 
             DB::commit();
 
             return response()->json([
                 'status' => 'success', 
-                'message' => 'Hore! Surat Tugas berhasil diselesaikan dan diarsipkan!'
+                'message' => 'Hore! Dokumen berhasil diselesaikan dan diarsipkan!',
+                'tanggal_cetak' => $dokumenCetak->tanggal_cetak
             ], 200);
             
         } catch (Throwable $e) {
@@ -274,7 +172,7 @@ class ArsipController extends Controller
     }
 
     /**
-     * Toggle Aktif / Nonaktif dokumen
+     * 4. Toggle Status Aktif Dokumen
      */
     public function toggleAktif($id)
     {
@@ -290,7 +188,53 @@ class ArsipController extends Controller
             ], 200);
             
         } catch (Throwable $e) {
-            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
+            return response()->json(['error' => $e->getMessage()], 500);
         }
+    }
+
+    
+    
+
+    // =========================================================================
+    // 🛠️ HELPER METHOD
+    // =========================================================================
+
+    private function simpanKeMasterDokumen(DokumenCetak $dokumenCetak, string $pathFotoFinal, int $opsiFoto, bool $isSuratTugas)
+    {
+        $userId = auth()->id() ?? $dokumenCetak->user_id;
+        
+        $karyawanId = DB::table('users')->where('id', $userId)->value('karyawan_id') 
+                    ?? DB::table('karyawan')->value('id') 
+                    ?? 1;
+
+        $template = Template::find($dokumenCetak->template_id);
+        $namaDokumenFinal = $dokumenCetak->nama_dokumen;
+        $lowerNama = strtolower($namaDokumenFinal);
+
+        if (str_contains($lowerNama, 'tor')) {
+            $jenisEnum = 'tor';
+        } elseif ($isSuratTugas) {
+            $jenisEnum = 'surat_tugas';
+        } else {
+            $jenisEnum = str_contains($lowerNama, 'kerusakan') ? 'kerusakan' : 'penyerahan';
+        }
+
+        DB::table('dokumen')->insert([
+            'template_id'      => $dokumenCetak->template_id,
+            'user_id'          => $userId, 
+            'jenis_dokumen_id' => $template?->jenis_dokumen_id ?? 1,
+            'nomor_dokumen'    => $namaDokumenFinal,                          
+            'tanggal_dokumen'  => $dokumenCetak->created_at ?? now(),    
+            'penyerah_id'      => $karyawanId,                 
+            'penerima_id'      => $karyawanId,                 
+            'opsi_foto'        => $opsiFoto,                 
+            'kolom_tambahan'   => is_string($dokumenCetak->variables) ? $dokumenCetak->variables : json_encode($dokumenCetak->variables),             
+            'file_sblm_print'  => $dokumenCetak->file_path,
+            'file_sesudah_ttd' => $pathFotoFinal,
+            'jenis'            => $jenisEnum, 
+            'tanggal_cetak'    => $dokumenCetak->tanggal_cetak ?? now(),                                           
+            'created_at'       => now(),
+            'updated_at'       => now(),
+        ]);
     }
 }

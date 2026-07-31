@@ -19,8 +19,6 @@ class Dokumen extends Model
         'jenis_dokumen_id',
         'nomor_dokumen',
         'jenis', 
-        'status',
-        'status_cetak',
         'tanggal_dokumen',
         'penyerah_id',
         'penerima_id',
@@ -29,6 +27,7 @@ class Dokumen extends Model
         'kolom_tambahan',
         'file_sblm_print',
         'file_sesudah_ttd',
+        'tanggal_cetak',
         'status_aktif'
     ];
 

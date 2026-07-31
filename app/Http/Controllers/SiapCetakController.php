@@ -6,31 +6,29 @@ use Illuminate\Http\Request;
 use App\Models\DokumenCetak;
 use App\Models\Template;
 use App\Services\DocumentGeneratorService; 
+use App\Services\DocumentNumberService;
 use Illuminate\Support\Facades\Validator;
-use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Carbon\Carbon;
 use Throwable;
 
 class SiapCetakController extends Controller
 {
     protected $documentService;
+    protected $numberService;
 
-    public function __construct(DocumentGeneratorService $documentService)
+    public function __construct(DocumentGeneratorService $documentService, DocumentNumberService $numberService)
     {
         $this->documentService = $documentService;
+        $this->numberService = $numberService;
     }
 
-    /**
-     * 1. Menampilkan data dokumen + SINKRONISASI STATUS VIRTUAL
-     */
     public function index(Request $request)
     {
         try {
-            // 🔐 Hanya menampilkan dokumen milik user yang sedang login
             $query = DokumenCetak::where('user_id', $request->user()->id)->latest();
 
-            // ✨ Filter status tetap bekerja lewat kondisi file_path secara realtime!
             if ($request->has('status')) {
                 if ($request->status === 'belum_dicetak') {
                     $query->whereNull('file_path')->orWhere('file_path', '');
@@ -41,32 +39,38 @@ class SiapCetakController extends Controller
 
             $data = $query->get()->map(function($dokumen) {
                 $template = Template::find($dokumen->template_id);
-                $namaTemplate = $template ? $template->nama : 'Dokumen';
+                $namaTemplate = $template ? ($template->nama ?? $template->nama_template) : 'Dokumen';
 
-                $vars = $dokumen->variables;
-                if (is_string($vars)) {
-                    $vars = json_decode($vars, true);
+                $vars = is_string($dokumen->variables) ? json_decode($dokumen->variables, true) : (array)$dokumen->variables;
+
+                $lowerTemplate = strtolower($namaTemplate);
+                $lowerDokumen = strtolower($dokumen->nama_dokumen ?? '');
+                $isTor = str_contains($lowerTemplate, 'tor') || str_contains($lowerDokumen, 'tor');
+
+                if ($isTor) {
+                    // Penamaan khusus TOR (diambil murni dari JSON variables)
+                    $namaBarang = $vars['nama_barang'] ?? $vars['barang'] ?? $vars['nama_item'] ?? '';
+                    $namaPenyerah = $vars['nama_penyerah'] ?? $vars['penyerah'] ?? $vars['nama_pembuat'] ?? $vars['pembuat'] ?? '';
+
+                    $detailTor = trim("{$namaBarang} {$namaPenyerah}");
+                    $namaOtomatis = !empty($detailTor) ? "{$namaTemplate} - {$detailTor}" : $namaTemplate;
                 } else {
-                    $vars = (array)$vars;
+                    // Penamaan standar untuk BA & Surat Tugas (ST)
+                    $rawNo = $vars['no'] ?? 1;
+                    $noUrut = is_numeric($rawNo) ? sprintf("%03d", (int)$rawNo) : $rawNo;
+
+                    $tahun = $dokumen->created_at ? $dokumen->created_at->format('Y') : date('Y');
+                    $bulanAngka = $dokumen->created_at ? (int)$dokumen->created_at->format('n') : (int)date('n');
+                    $bulanRomawi = DocumentNumberService::getBulanRomawi($bulanAngka);
+
+                    $kodeFormat = (str_contains($lowerTemplate, 'surat tugas') || str_contains($lowerDokumen, 'surat tugas')) ? "SPPD/O" : "BA";
+
+                    $namaOtomatis = "{$namaTemplate} - {$noUrut}/BTG-{$bulanRomawi}/{$kodeFormat}/{$tahun}";
                 }
-                $noUrut = $vars['no'] ?? '000';
-                $tahun = $dokumen->created_at ? $dokumen->created_at->format('Y') : date('Y');
-
-                $bulanAngka = $dokumen->created_at ? (int)$dokumen->created_at->format('n') : (int)date('n');
-                $romawiArr = [1=>'I', 2=>'II', 3=>'III', 4=>'IV', 5=>'V', 6=>'VI', 7=>'VII', 8=>'VIII', 9=>'IX', 10=>'X', 11=>'XI', 12=>'XII'];
-                $bulanRomawi = $romawiArr[$bulanAngka] ?? 'I';
-
-                $namaOtomatis = "{$namaTemplate} - {$noUrut}/BTG-{$bulanRomawi}/BA/{$tahun}";
                 
                 $dokumen->nama_dokumen = $namaOtomatis;
                 $dokumen->nama_arsip_display = $namaOtomatis; 
-
-                // ✨ MEMBUAT STATUS VIRTUAL BIAR FRONTEND TIDAK ERROR ✨
                 $dokumen->status = !empty($dokumen->file_path) ? 'sudah_dicetak' : 'belum_dicetak';
-
-                $dokumen->items = DB::table('dokumen_item')
-                    ->where('dokumen_id', $dokumen->id)
-                    ->get();
 
                 return $dokumen;
             });
@@ -78,16 +82,11 @@ class SiapCetakController extends Controller
         }
     }
 
-    /**
-     * 2. MENYIMPAN DRAFT BARU + Format Otomatis BA Kerusakan
-     * (Menghasilkan .docx agar bisa langsung didownload dan diedit)
-     */
     public function store(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'template_id'  => 'required',
-            'nama_dokumen' => 'required|string|max:255',
-            'variables'    => 'required', 
+            'template_id' => 'required',
+            'variables'   => 'required', 
         ]);
 
         if ($validator->fails()) {
@@ -101,105 +100,57 @@ class SiapCetakController extends Controller
         DB::beginTransaction();
 
         try {
-            $variablesInput = $request->variables;
-            if (is_string($variablesInput)) {
-                $variables = json_decode($variablesInput, true);
-            } else {
-                $variables = (array)$variablesInput;
-            }
+            $variables = is_string($request->variables) ? json_decode($request->variables, true) : (array)$request->variables;
 
-            $currentTemplate = Template::find($request->template_id);
-            $templateNama = $currentTemplate ? strtolower($currentTemplate->nama) : '';
-            
-            // Deteksi jenis dokumen (Surat Tugas, Penyerahan, atau Kerusakan)
-            $isSuratTugas = str_contains($templateNama, 'surat tugas') || str_contains(strtolower($request->nama_dokumen), 'surat tugas');
-            $isBaPenyerahan = str_contains($templateNama, 'penyerahan') || str_contains(strtolower($request->nama_dokumen), 'penyerahan');
-            $isBaKerusakan = str_contains($templateNama, 'kerusakan') || str_contains(strtolower($request->nama_dokumen), 'kerusakan');
+            // =========================================================================
+            // TAMBAHAN: OLAH FOTO UPLOAD & MASUKKAN KE ARRAY $variables['foto']
+            // =========================================================================
+            if ($request->hasFile('foto')) {
+                $dirPath = public_path('uploads/lampiran');
+                if (!is_dir($dirPath)) {
+                    @mkdir($dirPath, 0777, true);
+                }
 
-            $groupedTemplateIds = Template::where('nama', $isSuratTugas ? 'like' : 'not like', '%surat tugas%')->pluck('id');
-            
-            // 🌎 Tetap global se-database seperti kodemu sebelumnya
-            $lastDocument = DokumenCetak::whereIn('template_id', $groupedTemplateIds)->whereYear('created_at', now()->year)->latest('id')->first();
+                $uploadedPhotos = [];
+                $files = is_array($request->file('foto')) ? $request->file('foto') : [$request->file('foto')];
 
-            $nextNo = '001'; 
-            if ($lastDocument) {
-                $lastVars = $lastDocument->variables;
-                if (is_string($lastVars)) { $lastVars = json_decode($lastVars, true); } else { $lastVars = (array)$lastVars; }
-                if (isset($lastVars['no']) && is_numeric($lastVars['no'])) {
-                    $nextNo = str_pad((int)$lastVars['no'] + 1, 3, '0', STR_PAD_LEFT);
+                foreach ($files as $file) {
+                    if ($file->isValid()) {
+                        $filename = time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+                        $file->move($dirPath, $filename);
+
+                        $uploadedPhotos[] = [
+                            'path'       => 'uploads/lampiran/' . $filename,
+                            'keterangan' => 'Foto Lampiran'
+                        ];
+                    }
+                }
+
+                if (!empty($uploadedPhotos)) {
+                    $variables['foto'] = $uploadedPhotos;
                 }
             }
-            $variables['no'] = $nextNo;
+
+            $numData = $this->numberService->generate($request->template_id);
+
+            $variables['no'] = $numData['no'];
+            $variables['bulan'] = $numData['bulan_teks'];
+            $variables['tahun'] = $numData['tahun'];
 
             $siapCetak = DokumenCetak::create([
-                'user_id'      => $request->user()->id, // 🔐 Hanya ini tambahannya!
+                'user_id'      => $request->user()->id,
                 'template_id'  => $request->template_id,
-                'nama_dokumen' => $request->nama_dokumen,
+                'nama_dokumen' => $numData['nama_dokumen_final'],
                 'variables'    => $variables, 
             ]);
 
-            // Ambil nama item awal dari request / variables
-            $namaItem = $request->nama_item ?? $variables['item'] ?? $variables['nama_item'] ?? $variables['nama_alat'] ?? '';
-            
-            if (!empty($namaItem) || $isBaKerusakan) {
-                if ($isBaKerusakan) {
-                    // ✨ Kondisi khusus BA Kerusakan (Sesuai Request-mu) ✨
-                    $namaAlat = $variables['nama_alat'] ?? $namaItem ?? 'Alat';
-                    $namaItem = $namaAlat; 
-                    
-                    $merk = $variables['merk'] ?? '';
-                    $model = $variables['model'] ?? '';
-                    $noSeri = $variables['no_seri'] ?? '';
-                    $spesifikasiFinal = "Merk :{$merk}, Model :{$model}, No Seri :{$noSeri}";
-                    
-                    $jumlahFinal = 1;
-                    
-                    $namaLaporan = $variables['nama_laporan'] ?? $variables['nama_pelapor'] ?? '-';
-                    $namaPenanggung = $variables['nama_penanggung'] ?? $variables['nama_penanggung_jawab'] ?? '-';
-                    $keteranganFinal = "{$namaAlat} mengalami kerusakan yang dilapor oleh {$namaLaporan} dan ditanggung jawabkan oleh {$namaPenanggung}";
-                } elseif ($isBaPenyerahan) {
-                    // Kondisi khusus BA Penyerahan
-                    $spesifikasiFinal = $request->spesifikasi ?? $variables['spesifikasi'] ?? '';
-                    $jumlahFinal = 1;
-                    $namaPenyerah = $variables['nama_penyerah'] ?? '-';
-                    $namaPenerima = $variables['nama_penerima'] ?? '-';
-                    $keteranganFinal = "{$namaItem} diserahkan oleh {$namaPenyerah} kepada {$namaPenerima}";
-                } else {
-                    // Kondisi default dokumen lain
-                    $spesifikasiFinal = $request->spesifikasi ?: "Merk: " . ($variables['merk'] ?? '-') . ", Model: " . ($variables['model'] ?? '-') . ", No Seri: " . ($variables['no_seri'] ?? '-');
-                    $jumlahFinal = isset($variables['nama_alat']) ? 1 : ($request->jumlah ?? 1); 
-                    $keteranganFinal = $request->keterangan_item ?? $variables['keterangan_kerusakan'] ?? '';
-                }
-
-                DB::table('dokumen_item')->insert([
-                    'dokumen_id'  => $siapCetak->id,
-                    'nama_item'   => $namaItem,
-                    'spesifikasi' => $spesifikasiFinal,
-                    'jumlah'      => $jumlahFinal, 
-                    'keterangan'  => $keteranganFinal,
-                    'created_at'  => now(), 
-                    'updated_at'  => now(),
-                ]);
-            }
-
-            if ($request->allFiles()) {
-                foreach ($request->allFiles() as $fileKey => $file) {
-                    if ($fileKey === 'foto_ttd') continue; 
-                    $nameFile = time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
-                    $file->move(public_path('uploads/dokumen'), $nameFile);
-                    $pathFotoFinal = 'uploads/dokumen/' . $nameFile;
-
-                    DB::table('dokumen_foto')->insert([
-                        'dokumen_id' => $siapCetak->id, 'path_foto' => $pathFotoFinal, 'created_at' => now(), 'updated_at' => now(),
-                    ]);
-                    $variables[$fileKey] = $pathFotoFinal;
-                }
-                $siapCetak->update(['variables' => $variables]);
-            }
-
+            // Generate Word (.docx) & simpan path ke DB
             $filePathFisik = $this->documentService->generate($siapCetak);
             $siapCetak->file_path = $filePathFisik;
             $siapCetak->save();
+
+            // Generate PDF awal sebagai snapshot
+            $this->documentService->generatePdf($siapCetak);
 
             DB::commit();
 
@@ -207,7 +158,7 @@ class SiapCetakController extends Controller
 
             return response()->json([
                 'status' => 'success',
-                'message' => 'Data draft & file Word berhasil dibuat!',
+                'message' => 'Data draft, file Word & PDF berhasil dibuat!',
                 'data' => $siapCetak
             ], 201);
 
@@ -217,123 +168,159 @@ class SiapCetakController extends Controller
         }
     }
 
-    /**
-     * 3. UPDATE DRAFT + Format Otomatis BA Kerusakan
-     * (Menyimpan dalam format .docx agar jika draf diperbarui masih bisa diedit lagi)
-     */
     public function update(Request $request, $id)
     {
         DB::beginTransaction();
 
         try {
+            $newVariables = is_string($request->variables) ? json_decode($request->variables, true) : (array)$request->variables;
+            $status = $request->input('status', $newVariables['status'] ?? 'draft');
+
+            // =========================================================================
+            // TAMBAHAN: OLAH FOTO JIKA ADA FOTO BARU SAAT UPDATE
+            // =========================================================================
+            if ($request->hasFile('foto')) {
+                $dirPath = public_path('uploads/lampiran');
+                if (!is_dir($dirPath)) {
+                    @mkdir($dirPath, 0777, true);
+                }
+
+                $uploadedPhotos = [];
+                $files = is_array($request->file('foto')) ? $request->file('foto') : [$request->file('foto')];
+
+                foreach ($files as $file) {
+                    if ($file->isValid()) {
+                        $filename = time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+                        $file->move($dirPath, $filename);
+
+                        $uploadedPhotos[] = [
+                            'path'       => 'uploads/lampiran/' . $filename,
+                            'keterangan' => 'Foto Lampiran'
+                        ];
+                    }
+                }
+
+                if (!empty($uploadedPhotos)) {
+                    $newVariables['foto'] = $uploadedPhotos;
+                }
+            }
+
+            $draft = DB::table('drafts')->where('id', $id)->first();
+
+            if ($draft) {
+                if ($status === 'siap_cetak') {
+                    $templateId = $request->template_id ?? $draft->template_id;
+
+                    $numData = $this->numberService->generate($templateId);
+                    $newVariables['no'] = $numData['no'];
+                    $newVariables['bulan'] = $numData['bulan_teks'];
+                    $newVariables['tahun'] = $numData['tahun'];
+
+                    $siapCetak = DokumenCetak::create([
+                        'user_id'      => $request->user()->id,
+                        'template_id'  => $templateId,
+                        'nama_dokumen' => $numData['nama_dokumen_final'],
+                        'variables'    => $newVariables,
+                    ]);
+
+                    // Generate file Word & PDF pertama kali saat status berubah jadi siap_cetak
+                    $filePathFisik = $this->documentService->generate($siapCetak);
+                    $siapCetak->file_path = $filePathFisik;
+                    $siapCetak->save();
+
+                    $this->documentService->generatePdf($siapCetak);
+
+                    DB::table('drafts')->where('id', $id)->delete();
+
+                    DB::commit();
+
+                    return response()->json([
+                        'status' => 'success',
+                        'message' => 'Dokumen selesai dan berhasil dipindah ke Siap Cetak!',
+                        'data' => $siapCetak
+                    ], 200);
+                } else {
+                    DB::table('drafts')->where('id', $id)->update([
+                        'data_input' => json_encode($newVariables),
+                        'updated_at' => now(),
+                    ]);
+
+                    DB::commit();
+
+                    return response()->json([
+                        'status' => 'success',
+                        'message' => 'Draft berhasil diperbarui!',
+                        'data' => $newVariables
+                    ], 200);
+                }
+            }
+
             $dokumen = DokumenCetak::findOrFail($id);
-            $variablesInput = $request->variables;
-            $newVariables = is_string($variablesInput) ? json_decode($variablesInput, true) : (array)$variablesInput;
             $oldVariables = is_string($dokumen->variables) ? json_decode($dokumen->variables, true) : (array)$dokumen->variables;
 
-            $currentTemplate = Template::find($dokumen->template_id);
-            $templateNama = $currentTemplate ? strtolower($currentTemplate->nama) : '';
-            
-            $isBaPenyerahan = str_contains($templateNama, 'penyerahan') || str_contains(strtolower($request->nama_dokumen ?? $dokumen->nama_dokumen), 'penyerahan');
-            $isBaKerusakan = str_contains($templateNama, 'kerusakan') || str_contains(strtolower($request->nama_dokumen ?? $dokumen->nama_dokumen), 'kerusakan');
-
-            DB::table('dokumen_item')->where('dokumen_id', $id)->delete();
-
-            $namaItem = $request->nama_item ?? $newVariables['item'] ?? $newVariables['nama_item'] ?? $newVariables['nama_alat'] ?? '';
-            
-            if (!empty($namaItem) || $isBaKerusakan) {
-                if ($isBaKerusakan) {
-                    // ✨ Kondisi khusus BA Kerusakan Saat Update ✨
-                    $namaAlat = $newVariables['nama_alat'] ?? $namaItem ?? 'Alat';
-                    $namaItem = $namaAlat;
-                    
-                    $merk = $newVariables['merk'] ?? '';
-                    $model = $newVariables['model'] ?? '';
-                    $noSeri = $newVariables['no_seri'] ?? '';
-                    $spesifikasiFinal = "Merk :{$merk}, Model :{$model}, No Seri :{$noSeri}";
-                    
-                    $jumlahFinal = 1;
-                    
-                    $namaLaporan = $newVariables['nama_laporan'] ?? $newVariables['nama_pelapor'] ?? '-';
-                    $namaPenanggung = $newVariables['nama_penanggung'] ?? $newVariables['nama_penanggung_jawab'] ?? '-';
-                    $keteranganFinal = "{$namaAlat} mengalami kerusakan yang dilapor oleh {$namaLaporan} dan ditanggung jawabkan oleh {$namaPenanggung}";
-                } elseif ($isBaPenyerahan) {
-                    $spesifikasiFinal = $request->spesifikasi ?? $newVariables['spesifikasi'] ?? '';
-                    $jumlahFinal = 1;
-                    $namaPenyerah = $newVariables['nama_penyerah'] ?? '-';
-                    $penerimaFinal = $newVariables['nama_penerima'] ?? '-';
-                    $keteranganFinal = "{$namaItem} diserahkan oleh {$namaPenyerah} kepada {$penerimaFinal}";
-                } else {
-                    $spesifikasiFinal = $request->spesifikasi ?: "Merk: " . ($newVariables['merk'] ?? '-') . ", Model: " . ($newVariables['model'] ?? '-') . ", No Seri: " . ($newVariables['no_seri'] ?? '-');
-                    $jumlahFinal = isset($newVariables['nama_alat']) ? 1 : ($request->jumlah ?? 1); 
-                    $keteranganFinal = $request->keterangan_item ?? $newVariables['keterangan_kerusakan'] ?? '';
-                }
-
-                DB::table('dokumen_item')->insert([
-                    'dokumen_id'  => $id,
-                    'nama_item'   => $namaItem,
-                    'spesifikasi' => $spesifikasiFinal,
-                    'jumlah'      => $jumlahFinal, 
-                    'keterangan'  => $keteranganFinal,
-                    'created_at'  => now(), 
-                    'updated_at'  => now(),
-                ]);
+            if (isset($oldVariables['no'])) { 
+                $newVariables['no'] = $oldVariables['no']; 
             }
 
-            if ($request->allFiles()) {
-                $oldPhotos = DB::table('dokumen_foto')->where('dokumen_id', $id)->get();
-                foreach ($oldPhotos as $p) { if (File::exists(public_path($p->path_foto))) { File::delete(public_path($p->path_foto)); } }
-                DB::table('dokumen_foto')->where('dokumen_id', $id)->delete();
-
-                foreach ($request->allFiles() as $fileKey => $file) {
-                    if ($fileKey === 'foto_ttd') continue;
-                    $nameFile = time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
-                    $file->move(public_path('uploads/dokumen'), $nameFile);
-                    $pathFotoFinal = 'uploads/dokumen/' . $nameFile;
-
-                    DB::table('dokumen_foto')->insert([
-                        'dokumen_id' => $id, 'path_foto' => $pathFotoFinal, 'created_at' => now(), 'updated_at' => now(),
-                    ]);
-                    $newVariables[$fileKey] = $pathFotoFinal;
-                }
+            // Jika tidak ada foto baru dikirim, pertahankan foto lama jika ada
+            if (!isset($newVariables['foto']) && isset($oldVariables['foto'])) {
+                $newVariables['foto'] = $oldVariables['foto'];
             }
 
-            if (isset($oldVariables['no'])) { $newVariables['no'] = $oldVariables['no']; }
             $dokumen->update([
-                'nama_dokumen' => $request->nama_dokumen ?? $dokumen->nama_dokumen,
-                'variables'    => $newVariables,
+                'variables' => $newVariables,
             ]);
+
+            // Re-generate saat benar-benar melakukan UPDATE data secara sengaja
+            $filePathFisik = $this->documentService->generate($dokumen);
+            $dokumen->file_path = $filePathFisik;
+            $dokumen->save();
+
+            $this->documentService->generatePdf($dokumen);
 
             DB::commit();
 
-            return response()->json(['status' => 'success', 'message' => 'Draft berhasil diperbarui!', 'data' => $dokumen], 200);
+            return response()->json(['status' => 'success', 'message' => 'Draft & file dokumen berhasil diperbarui!', 'data' => $dokumen], 200);
 
         } catch (Throwable $e) {
             DB::rollBack();
-            return response()->json(['status' => 'error', 'message' => 'Gagal diperbarui data draft.', 'error' => $e->getMessage()], 500);
+            return response()->json(['status' => 'error', 'message' => 'Gagal diperbarui data draft: ' . $e->getMessage()], 500);
         }
     }
 
-    /**
-     * 4. Memperbarui status dokumen saat tombol PRINT ditekan.
-     * ✨ SEKARANG MENANGKAP COPIES & PAGES UNTUK DIGANDAKAN DI PDF ✨
-     */
     public function updateStatus(Request $request, $id)
     {
         try {
             $dokumen = DokumenCetak::findOrFail($id);
+            $now = now();
             
-            // 📥 Tangkap input copies dan pages dari React
-            $copies = (int) $request->input('copies', 1);
-            $pages  = $request->input('pages', 'All');
+            if (empty($dokumen->foto_ttd)) {
+                DB::table('dokumen_cetak')
+                    ->where('id', $id)
+                    ->where(function($q) {
+                        $q->whereNull('foto_ttd')->orWhere('foto_ttd', '');
+                    })
+                    ->update([
+                        'tanggal_cetak' => $now,
+                        'updated_at'    => $now
+                    ]);
 
-            // 🚀 Meneruskan copies dan pages ke dalam generator PDF di Service
-            $pdfRelativePath = $this->documentService->generatePdf($dokumen, $copies, $pages);
+                $dokumen = DokumenCetak::findOrFail($id);
+            }
+
+            // Tentukan perkiraan lokasi relative file PDF dari file_path Word
+            $pdfRelativePath = str_replace(['documents/', '.docx'], ['pdfs/', '.pdf'], $dokumen->file_path);
+
+            // ✅ CEK FISIK: Jika PDF belum ada di folder, baru dipanggil generatePdf sekali
+            if (empty($pdfRelativePath) || !file_exists(public_path($pdfRelativePath))) {
+                $pdfRelativePath = $this->documentService->generatePdf($dokumen);
+            }
 
             return response()->json([
                 'status' => 'success', 
-                'message' => 'Status cetak diperbarui dan PDF siap dicetak!',
-                'pdf_url' => asset($pdfRelativePath) // ⚡ Kirimkan URL PDF yang sudah digandakan halamannya ke React!
+                'message' => 'PDF siap dicetak!',
+                'pdf_url' => asset($pdfRelativePath),
+                'tanggal_cetak' => $dokumen->tanggal_cetak
             ], 200);
             
         } catch (Throwable $e) {
@@ -341,27 +328,29 @@ class SiapCetakController extends Controller
         }
     }
 
-    /**
-     * 5. Mengambil URL unduhan file Word (RE-GENERATE ON DOWNLOAD)
-     * (Tetap mengunduh file berekstensi .docx untuk keperluan edit user)
-     */
-    public function download(Request $request, $id)
+    public function cetak($id)
     {
         try {
-            $antrean = DokumenCetak::findOrFail($id);
-            $filePathFisik = $this->documentService->generate($antrean);
+            $dokumen = DokumenCetak::findOrFail($id);
 
-            $antrean->file_path = $filePathFisik;
-            $antrean->save();
+            $pdfRelativePath = str_replace(['documents/', '.docx'], ['pdfs/', '.pdf'], $dokumen->file_path);
+            $filePathFisik = public_path($pdfRelativePath);
 
-            return response()->json([
-                'status' => 'success',
-                'download_url' => asset($filePathFisik)
-            ], 200);
+            // Jika file PDF fisik tidak ada, baru fallback ke generatePdf
+            if (!file_exists($filePathFisik)) {
+                $pdfRelativePath = $this->documentService->generatePdf($dokumen);
+                $filePathFisik = public_path($pdfRelativePath);
+            }
+
+            // Langsung kembalikan file PDF statis yang sudah tersimpan
+            return response()->file($filePathFisik, [
+                'Content-Type' => 'application/pdf',
+                'Content-Disposition' => 'inline; filename="' . ($dokumen->nama_dokumen ?? 'dokumen') . '.pdf"'
+            ]);
 
         } catch (ModelNotFoundException $e) {
-            return response()->json(['status' => 'error', 'message' => 'Data tidak ditemukan.'], 404);
-        } catch (Throwable $e) { 
+            return response()->json(['status' => 'error', 'message' => 'Dokumen tidak ditemukan.'], 404);
+        } catch (Throwable $e) {
             return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
         }
     }

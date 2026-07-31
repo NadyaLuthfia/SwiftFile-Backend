@@ -4,82 +4,161 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use App\Models\Template;
-use App\Models\Draft;
-use App\Models\DokumenCetak;
-use Illuminate\Support\Facades\DB; 
+use App\Models\User;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
 
 class DashboardController extends Controller
 {
-    /**
-     * Mengambil seluruh hitungan statistik real-time untuk Dashboard (Berlaku untuk SEMUA Role)
-     */
     public function dashboardStats(Request $request) 
     {
         try {
-            $user = $request->user(); // 🔐 Ambil data user yang sedang login
+            $authUser = $request->user();
+            $isUserRole = $authUser && ($authUser->role === 'user');
 
-            // Ambil identitas user dengan sistem pengaman berlapis
-            $identity = $user->name ?? $user->username ?? $user->nama ?? null;
-
-            // 1. Hitung total data dari master template (Global, semua role bisa lihat)
+            // 1. Total master template
             $totalTemplates = Template::count();
 
-            // 2. ✨ HITUNG DRAFT BERKAS (🔒 Sekarang dikunci untuk semua role)
-            $draftQuery = Draft::query();
-            if ($user) {
-                $draftQuery->where(function($q) use ($user, $identity) {
-                    $q->where('user_id', $user->id);
-                    
-                    if (!empty($identity)) {
-                        // Disamakan dengan DraftController agar hitungannya sinkron sempurna
-                        $q->orWhereRaw("LOWER(data_input) LIKE ?", ['%"nama_penanggung":"' . strtolower($identity) . '"%']);
-                    }
-                });
-            }
-            $totalDrafts = $draftQuery->count();
+            // 2. Cek ketersediaan tabel 'dokumen'
+            $hasDokumenTable = Schema::hasTable('dokumen');
             
-            // 3. ✨ HITUNG ANTREAN CETAK (🔒 Sekarang dikunci untuk semua role)
-            $antreanQuery = DokumenCetak::where(function($query) {
-                                $query->whereNull('file_path')
-                                      ->orWhere('file_path', '');
-                            });
-            if ($user) {
-                $antreanQuery->where(function($q) use ($user, $identity) {
-                    $q->where('user_id', $user->id);
-                    
-                    if (!empty($identity)) {
-                        // Scan nama penanggung jawab di kolom variables untuk semua role
-                        $q->orWhereRaw("LOWER(variables) LIKE ?", ['%' . strtolower($identity) . '%']);
-                    }
-                });
+            // 🔒 Total Arsip Sah (Private untuk user) & Total Dokumen Setahun
+            $totalArsip = 0;
+            $totalDokumenTahunIni = 0;
+
+            if ($hasDokumenTable && $authUser) {
+                $totalArsip = DB::table('dokumen')
+                    ->where('user_id', $authUser->id)
+                    ->count();
+
+                // 📊 Hitung total dokumen yang dibuat selama 1 tahun berjalan
+                $totalDokumenTahunIni = DB::table('dokumen')
+                    ->whereYear('created_at', Carbon::now()->year)
+                    ->count();
             }
-            $totalAntrean = $antreanQuery->count();
+
+            // Jika tabel dokumen belum ada
+            if (!$hasDokumenTable) {
+                $allTemplates = Template::all();
+                $rekap = $allTemplates->groupBy(function ($template) {
+                    return $template->nama_template ?? $template->nama ?? $template->jenis_file ?? 'Dokumen';
+                })->map(function ($templatesGroup, $jenisName) {
+                    return [
+                        'id'               => $templatesGroup->first()->id,
+                        'jenis_file'       => $jenisName,
+                        'nomor_terakhir'   => 'Belum ada',
+                        'tanggal_terakhir' => '-',
+                        'pembuat'          => '-',
+                        'total_dicetak'    => 0,
+                    ];
+                })->values();
+
+                return response()->json([
+                    'success' => true,
+                    'stats'   => [
+                        'total_templates'     => $totalTemplates, 
+                        'total_arsip'         => $totalArsip,
+                        'total_dokumen_tahun' => 0
+                    ],
+                    'rekap'   => $rekap
+                ], 200);
+            }
+
+            // Tarik seluruh dokumen terkait
+            $dokumenQuery = DB::table('dokumen');
+            if ($isUserRole && $authUser) {
+                $dokumenQuery->where('user_id', $authUser->id);
+            }
+            $allDokumen = $dokumenQuery->orderBy('id', 'desc')->get();
+
+            $dokumenByTemplate = $allDokumen->groupBy('template_id');
+
+            $userIds = $allDokumen->pluck('user_id')->filter()->unique();
+            $karyawanIdsDirect = $allDokumen->pluck('karyawan_id')->filter()->unique();
+
+            $karyawanMapDirect = DB::table('karyawan')
+                ->whereIn('id', $karyawanIdsDirect)
+                ->pluck('nama_lengkap', 'id');
+
+            $usersMap = User::whereIn('id', $userIds)->get()->keyBy('id');
             
-            // 4. ✨ HITUNG TOTAL ARSIP SAH (🔒 Sekarang dikunci untuk semua role)
-            $arsipQuery = DokumenCetak::whereNotNull('file_path')
-                                    ->where('file_path', '!=', '');
+            $userKaryawanIds = $usersMap->pluck('karyawan_id')->filter()->unique();
+            $karyawanMapViaUser = DB::table('karyawan')
+                ->whereIn('id', $userKaryawanIds)
+                ->pluck('nama_lengkap', 'id');
 
-            if ($user) {
-                $arsipQuery->where(function($q) use ($user, $identity) {
-                    $q->where('user_id', $user->id);
-                    
-                    if (!empty($identity)) {
-                        // Scan nama penanggung jawab di kolom variables untuk semua role
-                        $q->orWhereRaw("LOWER(variables) LIKE ?", ['%' . strtolower($identity) . '%']);
+            // Rekapitulasi per template
+            $allTemplates = Template::all();
+            $groupedTemplates = $allTemplates->groupBy(function ($template) {
+                return $template->nama_template ?? $template->nama ?? $template->jenis_file ?? 'Dokumen';
+            });
+
+            $rekap = $groupedTemplates->map(function ($templatesGroup, $jenisName) use ($dokumenByTemplate, $karyawanMapDirect, $usersMap, $karyawanMapViaUser) {
+                $templateIds = $templatesGroup->pluck('id');
+
+                $matchingDocs = $dokumenByTemplate->filter(function ($doc, $templateId) use ($templateIds) {
+                    return $templateIds->contains($templateId);
+                })->flatten();
+
+                $totalDicetak = $matchingDocs->count();
+                $lastDoc = $matchingDocs->first();
+
+                $nomorTerakhir = 'Belum ada';
+                if ($lastDoc) {
+                    $rawNomor = $lastDoc->nomor_dokumen ?? $lastDoc->nama_dokumen ?? $lastDoc->nomor ?? $lastDoc->no_dokumen ?? null;
+                    if (!empty($rawNomor)) {
+                        if (str_contains($rawNomor, ' - ')) {
+                            $parts = explode(' - ', $rawNomor, 2);
+                            $nomorTerakhir = trim($parts[1]);
+                        } else {
+                            $nomorTerakhir = trim($rawNomor);
+                        }
                     }
-                });
-            }
-            $totalArsip = $arsipQuery->count();
+                }
 
-            // 5. Kembalikan response JSON terpadu ke React Frontend dengan key yang sama persis
+                $pembuat = '-';
+                if ($lastDoc) {
+                    if (!empty($lastDoc->karyawan_id) && isset($karyawanMapDirect[$lastDoc->karyawan_id])) {
+                        $pembuat = $karyawanMapDirect[$lastDoc->karyawan_id];
+                    }
+
+                    if ($pembuat === '-' && !empty($lastDoc->user_id) && isset($usersMap[$lastDoc->user_id])) {
+                        $userDb = $usersMap[$lastDoc->user_id];
+                        if (!empty($userDb->karyawan_id) && isset($karyawanMapViaUser[$userDb->karyawan_id])) {
+                            $pembuat = $karyawanMapViaUser[$userDb->karyawan_id];
+                        } else {
+                            $pembuat = $userDb->username ?? $userDb->name ?? 'User #' . $userDb->id;
+                        }
+                    }
+                }
+
+                $tanggalTerakhir = '-';
+                if ($lastDoc) {
+                    $rawDate = $lastDoc->created_at ?? $lastDoc->tanggal ?? null;
+                    if ($rawDate) {
+                        $tanggalTerakhir = Carbon::parse($rawDate)->locale('id')->isoFormat('D MMMM YYYY');
+                    }
+                }
+
+                return [
+                    'id'               => $templatesGroup->first()->id,
+                    'jenis_file'       => $jenisName,
+                    'nomor_terakhir'   => $nomorTerakhir,
+                    'tanggal_terakhir' => $tanggalTerakhir,
+                    'pembuat'          => $pembuat,
+                    'total_dicetak'    => $totalDicetak,
+                ];
+            })->values();
+
             return response()->json([
                 'success' => true,
                 'stats' => [ 
-                    'total_templates' => $totalTemplates,
-                    'total_drafts'    => $totalDrafts,
-                    'total_antrean'   => $totalAntrean,
-                    'total_arsip'     => $totalArsip,
-                ]
+                    'total_templates'     => $totalTemplates,
+                    'total_arsip'         => $totalArsip,
+                    'total_dokumen_tahun' => $totalDokumenTahunIni,
+                ],
+                'rekap' => $rekap
             ], 200);
 
         } catch (\Exception $e) {

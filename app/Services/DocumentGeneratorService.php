@@ -5,211 +5,238 @@ namespace App\Services;
 use App\Models\DokumenCetak;
 use App\Models\Template;
 use PhpOffice\PhpWord\TemplateProcessor;
-use Illuminate\Support\Facades\DB;
-use \Carbon\Carbon; // 🇮🇩 PENTING: Untuk penanganan format bulan teks bahasa Indonesia
+use Carbon\Carbon;
+use ZipArchive;
+use Exception;
 use Throwable;
-use setasign\Fpdi\Fpdi; // ⚡ Pustaka untuk memanipulasi halaman PDF
 
 class DocumentGeneratorService 
 {
-
-    /**
-     * 📝 LOGIKA UTAMA: Membuat file Word (.docx)
-     */
-    public function generate(DokumenCetak $antrean)
+    public function generate(DokumenCetak $antrean, int $batasFoto = 0, int $kolomPerBaris = 4): string
     {
         $templateMaster = Template::find($antrean->template_id);
         if (!$templateMaster) {
-            throw new \Exception('Template tidak ditemukan.');
+            throw new Exception('Template tidak ditemukan.');
         }
 
         $templateMasterPath = public_path($templateMaster->file_path);
         if (!file_exists($templateMasterPath)) {
-            throw new \Exception('File master template tidak ada.');
+            throw new Exception('File master template tidak ada.');
         }
 
-        // Decode variabel dokumen
+        // 1. Extract JSON Variables dari model DokumenCetak
         $variables = $antrean->variables;
         if (is_string($variables)) {
-            $variables = json_decode($variables, true);
+            $variables = json_decode($variables, true) ?? [];
         } else {
             $variables = (array)$variables;
         }
 
+        // 2. Extract rincian barang & item pertama langsung dari JSON
+        $rincianBarang = $variables['rincian_barang'] ?? $variables['items'] ?? $variables['rincian'] ?? [];
+        $firstItem     = (!empty($rincianBarang) && is_array($rincianBarang)) ? (array)$rincianBarang[0] : [];
+
+        // =========================================================================
+        // AMBIL DATA & FORMAT NAMA DOKUMEN (KHUSUS TOR BARANG)
+        // =========================================================================
+        $namaBarang = $variables['nama_barang'] ?? '';
+        if (empty($namaBarang) && !empty($firstItem)) {
+            $namaBarang = $firstItem['barang'] ?? $firstItem['nama_barang'] ?? $firstItem['nama_item'] ?? '';
+        }
+
+        $namaPenyerah = $variables['nama_penyerah'] ?? $variables['penyerah'] ?? '';
+
+        // DETEKSI JENIS TEMPLATE
+        $namaTemplate = $templateMaster->nama;
+        $namaLower    = strtolower($namaTemplate);
+        $isSuratTugas = str_contains($namaLower, 'surat tugas');
+        $isTorBarang  = str_contains($namaLower, 'tor barang');
+        $isTor        = $isTorBarang || str_contains($namaLower, 'tor');
+
         $noUrut = $variables['no'] ?? '000';
-        
-        // -----------------------------------------------------------------
-        // 🇮🇩 FIX LOGIC TANGGAL: Bikin format panjang & format pendek (dd/mm/yy)
-        // -----------------------------------------------------------------
+
+        // FORMAT NAMA DOKUMEN & FILE
+        if ($isTorBarang) {
+            $parts = ['TOR Barang'];
+            if (!empty($namaBarang)) {
+                $parts[] = $namaBarang;
+            }
+            if (!empty($namaPenyerah)) {
+                $parts[] = $namaPenyerah;
+            }
+            $namaDokumen = implode(' - ', $parts);
+
+            $antrean->nama_dokumen = $namaDokumen;
+            $antrean->save();
+        } else {
+            $namaDokumen = $antrean->nama_dokumen ?? "{$templateMaster->nama} - {$noUrut}";
+        }
+
         $dateObj = $antrean->created_at ? Carbon::parse($antrean->created_at) : Carbon::now();
-        
         $tahun = $dateObj->format('Y');
         $bulanAngka = (int)$dateObj->format('n');
-        
-        $romawiArr = [1=>'I', 2=>'II', 3=>'III', 4=>'IV', 5=>'V', 6=>'VI', 7=>'VII', 8=>'VIII', 9=>'IX', 10=>'X', 11=>'XI', 12=>'XII'];
-        $bulanRomawi = $romawiArr[$bulanAngka] ?? 'I';
 
-        // 1. Nama bulan alfabet teks biasa (Contoh: Juli)
-        $bulanTeksBiasa = $dateObj->translatedFormat('F');
+        $bulanRomawi = DocumentNumberService::getBulanRomawi($bulanAngka);
+        $bulanTeksBiasa = DocumentNumberService::getBulanIndo($bulanAngka);
+        $tanggalLengkap = $dateObj->format('d') . ' ' . $bulanTeksBiasa . ' ' . $tahun;
+        $tanggalPendek = $dateObj->format('d/m/Y');
 
-        // 2. Tanggal lengkap untuk bagian bawah dokumen (Contoh: 14 Juli 2026)
-        $tanggalLengkap = $dateObj->translatedFormat('d F Y');
-
-        // 3. Tanggal pendek untuk nomor/header atas (Contoh: 14/07/2026)
-        $tanggalPendek = $dateObj->format('d/m/Y'); 
-        // -----------------------------------------------------------------
-
-        // Format nama file resmi seragam
-        $namaTemplate = $templateMaster->nama;
-        $namaFileFisik = "{$namaTemplate} - {$noUrut}-BTG-{$bulanRomawi}-BA-{$tahun}.docx";
+        $namaFileFisik = "{$namaDokumen}.docx";
         $namaFileFisik = str_replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], '-', $namaFileFisik);
 
         $dirPath = public_path('documents');
         if (!is_dir($dirPath)) {
             @mkdir($dirPath, 0777, true);
         }
-        $pathFile = $dirPath . '/' . $namaFileFisik; 
+        $pathFile = $dirPath . '/' . $namaFileFisik;
 
-        // Copy dari master template ke tujuan output
         copy($templateMasterPath, $pathFile);
 
-        // 🇮🇩 Deteksi jenis template untuk penanganan tanggal custom
-        $isSuratTugas = str_contains(strtolower($namaTemplate), 'surat tugas');
-
-        // Intersepsi file XML langsung sebelum PHPWord memproses variabelnya
-        $zip = new \ZipArchive();
+        // =========================================================================
+        // PROSES PEMBERSIHAN TAG XML & MACRO REPLACEMENT
+        // =========================================================================
+        $zip = new ZipArchive();
         if ($zip->open($pathFile) === true) {
             $xmlContent = $zip->getFromName('word/document.xml');
-            
-            // Satukan tag kontigu agar string variabel utuh tidak terpecah oleh bumbu XML Word
-            $xmlContent = preg_replace_callback('/\$\{([^}]+)\}/', function($matches) {
-                return '${' . strip_tags($matches[1]) . '}';
-            }, $xmlContent);
-            
-            // FIX NOMOR SURAT: Deteksi ${bulan} khusus yang nempel di /BTG-.../
-            $xmlContent = preg_replace_callback('/\/BTG-((?:<[^>]*>)*)\$\{bulan\}((?:<[^>]*>)*)\//', function($matches) use ($bulanRomawi) {
-                return '/BTG-' . $matches[1] . $bulanRomawi . $matches[2] . '/';
-            }, $xmlContent);
-            
-            // 🇮🇩 DETEKSI & PERUBAHAN TANGGAL PERTAMA SECARA PRESISI (Limit: 1)
-            if ($isSuratTugas) {
-                $xmlContent = preg_replace('/\$\{tanggal\}/', '${tanggal_singkat}', $xmlContent, 1);
-            } else {
-                $xmlContent = preg_replace('/\$\{tanggal\}/', '${tanggal_hari_saja}', $xmlContent, 1);
-                $xmlContent = preg_replace('/\$\{bulan\}/', '${bulan_pembuka}', $xmlContent, 1);
-                $xmlContent = preg_replace('/\$\{tahun\}/', '${tahun_pembuka}', $xmlContent, 1);
+
+            if ($xmlContent) {
+                $xmlContent = preg_replace_callback('/\$[^{}<]*\{[^{}]*\}/s', function($matches) {
+                    return strip_tags($matches[0]);
+                }, $xmlContent);
+
+                $xmlContent = preg_replace_callback('/\$\{([^}]+)\}/', function($matches) {
+                    return '${' . trim(strip_tags($matches[1])) . '}';
+                }, $xmlContent);
+
+                $xmlContent = preg_replace_callback('/\/BTG-((?:<[^>]*>)*)\$\{bulan\}((?:<[^>]*>)*)\//', function($matches) use ($bulanRomawi) {
+                    return '/BTG-' . $matches[1] . $bulanRomawi . $matches[2] . '/';
+                }, $xmlContent);
+
+                if ($isSuratTugas) {
+                    $xmlContent = preg_replace('/\$\{tanggal\}/', '${tanggal_singkat}', $xmlContent, 1);
+                } else {
+                    $xmlContent = preg_replace('/\$\{tanggal\}/', '${tanggal_hari_saja}', $xmlContent, 1);
+                    $xmlContent = preg_replace('/\$\{bulan\}/', '${bulan_pembuka}', $xmlContent, 1);
+                    $xmlContent = preg_replace('/\$\{tahun\}/', '${tahun_pembuka}', $xmlContent, 1);
+                }
+
+                $zip->addFromString('word/document.xml', $xmlContent);
             }
-            
-            $zip->addFromString('word/document.xml', $xmlContent);
             $zip->close();
         }
 
-        // Jalankan PHPWord TemplateProcessor
         $templateProcessor = new TemplateProcessor($pathFile);
 
-        // Daftarkan penampung variabel tanggal khusus hasil interceptor XML
+        // Set variabel tanggal standar
         $templateProcessor->setValue('tanggal_singkat', $tanggalPendek);
         $templateProcessor->setValue('tanggal_hari_saja', $dateObj->format('d'));
         $templateProcessor->setValue('bulan_pembuka', $bulanTeksBiasa);
         $templateProcessor->setValue('tahun_pembuka', $tahun);
-
-        // Variabel utama sisa dokumen
         $templateProcessor->setValue('tanggal', $tanggalLengkap);
         $templateProcessor->setValue('bulan', $bulanTeksBiasa);
         $templateProcessor->setValue('tahun', $tahun);
 
-        // Isi variabel text biasa
-        if (is_array($variables)) {
-            foreach ($variables as $key => $value) {
-                if (str_starts_with($key, 'foto_')) {
+        // =========================================================================
+        // 1. PROSES TABEL RINCIAN MULTI-ROW (100% DARI JSON)
+        // =========================================================================
+        if (!empty($rincianBarang) && is_array($rincianBarang)) {
+            try {
+                $templateProcessor->cloneRow('no', count($rincianBarang));
+            } catch (Throwable $e) {
+                try {
+                    $templateProcessor->cloneRow('barang', count($rincianBarang));
+                } catch (Throwable $e) {}
+            }
+
+            foreach ($rincianBarang as $index => $item) {
+                $r = $index + 1;
+                $arr = (array)$item;
+
+                $itemBarang = $arr['barang'] ?? $arr['nama_barang'] ?? $arr['nama_item'] ?? '';
+                $qtyItem    = $arr['qty'] ?? $arr['jumlah'] ?? 1;
+                $satuanItem = $arr['satuan'] ?? 'Pcs';
+                $hSatuan    = $arr['harga_satuan'] ?? $arr['price'] ?? $arr['harga'] ?? 1;
+                $totalItem  = $arr['total'] ?? $arr['jumlah_harga'] ?? ($qtyItem * (is_numeric($hSatuan) ? $hSatuan : 1));
+
+                $noFormatted = $isTor ? sprintf('%02d', $r) : sprintf('%03d', $r);
+
+                $templateProcessor->setValue("no#{$r}", $noFormatted);
+                $templateProcessor->setValue("barang#{$r}", $itemBarang);
+                $templateProcessor->setValue("qty#{$r}", $qtyItem);
+                $templateProcessor->setValue("satuan#{$r}", $satuanItem);
+                $templateProcessor->setValue("harga_satuan#{$r}", is_numeric($hSatuan) ? number_format((float)$hSatuan, 0, ',', '.') : $hSatuan);
+                $templateProcessor->setValue("total#{$r}", is_numeric($totalItem) ? number_format((float)$totalItem, 0, ',', '.') : $totalItem);
+            }
+        }
+
+        // =========================================================================
+        // 2. PROSES HEADER & VARIABEL KEDUA
+        // =========================================================================
+        $templateProcessor->setValue('nama_barang', $variables['nama_barang'] ?? $firstItem['barang'] ?? $firstItem['nama_barang'] ?? '');
+        $templateProcessor->setValue('merk', $variables['merk'] ?? '');
+        $templateProcessor->setValue('type', $variables['type'] ?? $variables['tipe'] ?? '');
+        $templateProcessor->setValue('persyaratan_tambahan', $variables['persyaratan_tambahan'] ?? $firstItem['spesifikasi'] ?? '');
+        $templateProcessor->setValue('jumlah', $variables['jumlah'] ?? $firstItem['jumlah'] ?? $firstItem['qty'] ?? '1');
+
+        $spesifikasiVal = $variables['spesifikasi'] ?? $firstItem['spesifikasi'] ?? '';
+        $templateProcessor->setValue('spesifikasi', $spesifikasiVal);
+
+        $rincianBiayaVal = $variables['rincian_biaya'] ?? $variables['rincian_komponen_biaya'] ?? $variables['rincian'] ?? '';
+        if (is_array($rincianBiayaVal)) {
+            $rincianBiayaVal = implode(', ', array_filter($rincianBiayaVal, 'is_scalar'));
+        }
+        $templateProcessor->setValue('rincian_biaya', $rincianBiayaVal);
+        $templateProcessor->setValue('rincian_biaya ', $rincianBiayaVal);
+
+        $hSatuanSec2 = $variables['harga_satuan'] ?? $firstItem['harga_satuan'] ?? null;
+        $jHargaSec2  = $variables['jumlah_harga'] ?? $firstItem['jumlah_harga'] ?? $variables['total'] ?? null;
+
+        $templateProcessor->setValue('harga_satuan', is_numeric($hSatuanSec2) ? number_format((float)$hSatuanSec2, 0, ',', '.') : ($hSatuanSec2 ?? ''));
+        $templateProcessor->setValue('jumlah_harga', is_numeric($jHargaSec2) ? number_format((float)$jHargaSec2, 0, ',', '.') : ($jHargaSec2 ?? ''));
+
+        // =========================================================================
+        // 3. FOTO & LAMPIRAN (EXTRACT DARI JSON $variables)
+        // =========================================================================
+        $rawPhotos   = $variables['foto'] ?? $variables['photos'] ?? $variables['lampiran_foto'] ?? [];
+        $validPhotos = $this->filterValidPhotos($rawPhotos, $batasFoto);
+
+        $this->injectLampiranFotoBarang($templateProcessor, $validPhotos);
+        $this->injectTorBarangVariables($templateProcessor, $variables);
+
+        // =========================================================================
+        // 4. SET VALUE UNTUK VARIABEL SISA LAINNYA
+        // =========================================================================
+        $protectedKeys = [
+            'no', 'nama_barang', 'barang', 'spesifikasi', 'qty', 'jumlah', 'satuan',
+            'harga_satuan', 'total', 'jumlah_harga', 'barang_kiri', 'barang_kanan',
+            'foto_kiri', 'foto_kanan', 'rincian_barang', 'items', 'rincian', 'foto', 'photos', 'lampiran_foto'
+        ];
+
+        foreach ($variables as $key => $value) {
+            if (str_starts_with($key, 'foto_')) continue;
+            if (in_array($key, $protectedKeys)) continue;
+
+            if ($value === 'null' || is_null($value)) {
+                $value = '';
+            }
+
+            if (is_array($value)) {
+                if (count($value) > 0 && is_array(reset($value))) {
                     continue;
                 }
+                $value = implode(', ', array_filter($value, 'is_scalar'));
+            }
 
-                if ($value === 'null' || is_null($value)) {
-                    $value = '';
-                }
-
-                if ((str_contains($key, 'berangkat') || str_contains($key, 'tiba')) && !empty($value)) {
-                    try {
-                        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) {
-                            $value = Carbon::parse($value)->format('d/m/Y');
-                        }
-                    } catch (\Exception $e) {
-                        // Aman
+            if ((str_contains($key, 'berangkat') || str_contains($key, 'tiba')) && !empty($value)) {
+                try {
+                    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) {
+                        $value = Carbon::parse($value)->format('d/m/Y');
                     }
-                }
-
-                $templateProcessor->setValue($key, $value);
+                } catch (Exception $e) {}
             }
-        }
 
-        // Suntik data barang / item ke dalam tabel Word
-        $dbItems = DB::table('dokumen_item')->where('dokumen_id', $antrean->id)->get();
-        if ($dbItems->isNotEmpty()) {
-            $first = $dbItems->first();
-            $templateProcessor->setValue('item', $first->nama_item);
-            $templateProcessor->setValue('spesifikasi', $first->spesifikasi);
-            $templateProcessor->setValue('jumlah', $first->jumlah);
-        } else {
-            $templateProcessor->setValue('item', '-');
-            $templateProcessor->setValue('spesifikasi', '-');
-            $templateProcessor->setValue('jumlah', '-');
+            $templateProcessor->setValue($key, (string)$value);
         }
-
-        // -----------------------------------------------------------------
-        // ✨ LOGIKA FOTO: UKURAN DINAMIS (RESPONSIF BERDASARKAN JUMLAH FOTO)
-        // -----------------------------------------------------------------
-        $dbPhotos = DB::table('dokumen_foto')->where('dokumen_id', $antrean->id)->get();
-        
-        // 1. Filter & kumpulkan dulu foto yang filenya beralamat valid & ada fisiknya
-        $validPhotos = [];
-        foreach ($dbPhotos as $p) {
-            if (!empty($p->path_foto) && file_exists(public_path($p->path_foto))) {
-                $validPhotos[] = $p;
-            }
-        }
-        
-        $photoCount = count($validPhotos);
-
-        // 2. Kalkulasi ukuran otomatis berdasarkan jumlah foto yang masuk
-        if ($photoCount <= 1) {
-            $width = 560;  // 1 Foto: Lebar maksimal mepet margin
-            $height = 350;
-        } elseif ($photoCount == 2) {
-            $width = 460;  // 2 Foto: Mengecil sedikit agar muat vertikal 1 halaman
-            $height = 250;
-        } elseif ($photoCount == 3) {
-            $width = 280;  // 3 Foto: Lebih kecil lagi
-            $height = 200;
-        } else {
-            $width = 210;  // 4 Foto: Ukuran terkecil aman agar tidak ganti halaman
-            $height = 170;
-        }
-
-        $filledKeys = [];
-        $allKeys = ['foto_1', 'foto_2', 'foto_3', 'foto_4'];
-
-        // 3. Suntik gambar dengan ukuran dinamis yang sudah dihitung
-        foreach ($validPhotos as $index => $p) {
-            if ($index >= 4) break; // Batasi maksimal 4 foto sesuai kuota template
-            
-            $keyName = 'foto_' . ($index + 1);
-            $templateProcessor->setImageValue($keyName, [
-                'path'   => public_path($p->path_foto),
-                'width'  => $width,
-                'height' => $height,
-                'ratio'  => true // Mengunci aspek rasio asli agar gambar tidak penyet/tarik
-            ]);
-            $filledKeys[] = $keyName;
-        }
-
-        // Bersihkan sisa tag foto yang kosong/tidak terisi
-        foreach ($allKeys as $key) { 
-            if (!in_array($key, $filledKeys)) {
-                $templateProcessor->setValue($key, ''); 
-            }
-        }
-        // -----------------------------------------------------------------
 
         $templateProcessor->saveAs($pathFile);
 
@@ -217,143 +244,170 @@ class DocumentGeneratorService
     }
 
     /**
-     * 🖨️ FUNGSI PDF: Konversi Word ke PDF + Filter Halaman + Penggandaan Rangkap
+     * Helper filter foto fisik dari JSON array $variables
      */
-    public function generatePdf(DokumenCetak $antrean, int $copies = 1, string $pages = 'All')
+    private function filterValidPhotos($rawPhotos, int $batasFoto): array
     {
-        $docxRelativePath = $antrean->file_path;
-        if (empty($docxRelativePath) || !file_exists(public_path($docxRelativePath))) {
-            $docxRelativePath = $this->generate($antrean);
-            $antrean->file_path = $docxRelativePath;
-            $antrean->save();
+        if (!is_array($rawPhotos)) {
+            return [];
         }
+
+        $validPhotos = [];
+        foreach ($rawPhotos as $p) {
+            $path = '';
+            $ket  = '';
+
+            if (is_array($p)) {
+                $path = $p['path'] ?? $p['path_foto'] ?? $p['url'] ?? '';
+                $ket  = $p['keterangan'] ?? $p['caption'] ?? $p['barang'] ?? '';
+            } elseif (is_string($p)) {
+                $path = $p;
+            }
+
+            if (!empty($path) && file_exists(public_path($path))) {
+                $validPhotos[] = [
+                    'path'       => $path,
+                    'keterangan' => $ket,
+                ];
+            }
+        }
+
+        if ($batasFoto > 0 && count($validPhotos) > $batasFoto) {
+            $validPhotos = array_slice($validPhotos, 0, $batasFoto);
+        }
+
+        return $validPhotos;
+    }
+
+    public function generatePdf(DokumenCetak $antrean, int $copies = 1, string $pages = 'All', int $batasFoto = 0, int $kolomPerBaris = 4): string
+    {
+        $docxRelativePath = $this->generate($antrean, $batasFoto, $kolomPerBaris);
+        $antrean->file_path = $docxRelativePath;
+        $antrean->save();
 
         $docxAbsPath = public_path($docxRelativePath);
-        $dirPath = dirname($docxAbsPath);
+        $pdfDirPath  = public_path('pdfs');
 
-        $pdfFileName = pathinfo($docxAbsPath, PATHINFO_FILENAME) . '.pdf';
-        $pdfAbsPath = $dirPath . '/' . $pdfFileName;
-        $pdfRelativePath = 'documents/' . $pdfFileName;
-
-        if (!file_exists($pdfAbsPath)) {
-            $sofficePath = '';
-
-            if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-                $portablePath1 = base_path('libreoffice/program/soffice.exe');
-                $portablePath2 = base_path('libreoffice/App/libreoffice/program/soffice.exe');
-                $installedPath = 'C:\\Program Files\\LibreOffice\\program\\soffice.exe';
-
-                if (file_exists($portablePath1)) {
-                    $sofficePath = $portablePath1;
-                } elseif (file_exists($portablePath2)) {
-                    $sofficePath = $portablePath2;
-                } elseif (file_exists($installedPath)) {
-                    $sofficePath = $installedPath;
-                } else {
-                    throw new \Exception('Mesin LibreOffice tidak ditemukan. Pastikan terinstal atau ada di folder backend.');
-                }
-            } else {
-                $linuxPath = '/usr/bin/libreoffice';
-                $sofficePath = file_exists($linuxPath) ? $linuxPath : 'soffice';
-            }
-
-            if ($sofficePath === 'soffice') {
-                $cmd = "soffice --headless --convert-to pdf --outdir " . escapeshellarg($dirPath) . " " . escapeshellarg($docxAbsPath);
-            } else {
-                $escapedSoffice = '"' . $sofficePath . '"';
-                $cmd = "{$escapedSoffice} --headless --convert-to pdf --outdir " . escapeshellarg($dirPath) . " " . escapeshellarg($docxAbsPath);
-            }
-
-            exec($cmd);
+        if (!is_dir($pdfDirPath)) {
+            @mkdir($pdfDirPath, 0777, true);
         }
 
-        if (!file_exists($pdfAbsPath)) {
-            throw new \Exception('Gagal melakukan konversi awal ke PDF.');
+        $pdfFileName     = pathinfo($docxAbsPath, PATHINFO_FILENAME) . '.pdf';
+        $pdfAbsPath      = $pdfDirPath . '/' . $pdfFileName;
+        $pdfRelativePath = 'pdfs/' . $pdfFileName;
+
+        if (file_exists($pdfAbsPath)) {
+            @unlink($pdfAbsPath);
         }
 
-        $isAllPages = strtolower(trim($pages)) === 'all' || empty($pages);
+        $sofficePath = '';
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            $portablePath1 = base_path('libreoffice/program/soffice.exe');
+            $portablePath2 = base_path('libreoffice/App/libreoffice/program/soffice.exe');
+            $installedPath = 'C:\\Program Files\\LibreOffice\\program\\soffice.exe';
 
-        if ($copies > 1 || !$isAllPages) {
-            $pagesClean = preg_replace('/[^0-9,-]/', '', $pages);
-            if (empty($pagesClean)) {
-                $pagesClean = 'all';
-            }
+            if (file_exists($portablePath1)) $sofficePath = $portablePath1;
+            elseif (file_exists($portablePath2)) $sofficePath = $portablePath2;
+            elseif (file_exists($installedPath)) $sofficePath = $installedPath;
+            else throw new Exception('Mesin LibreOffice tidak ditemukan.');
+        } else {
+            $linuxPath = '/usr/bin/libreoffice';
+            $sofficePath = file_exists($linuxPath) ? $linuxPath : 'soffice';
+        }
 
-            $customFileName = pathinfo($docxAbsPath, PATHINFO_FILENAME) . "_c{$copies}_p{$pagesClean}.pdf";
-            $customAbsPath = $dirPath . '/' . $customFileName;
-            $customRelativePath = 'documents/' . $customFileName;
+        $cmd = ($sofficePath === 'soffice')
+            ? "soffice --headless --convert-to pdf --outdir " . escapeshellarg($pdfDirPath) . " " . escapeshellarg($docxAbsPath)
+            : '"' . $sofficePath . '" --headless --convert-to pdf --outdir ' . escapeshellarg($pdfDirPath) . ' ' . escapeshellarg($docxAbsPath);
 
-            if (file_exists($customAbsPath)) {
-                return $customRelativePath;
-            }
+        exec($cmd);
 
-            try {
-                $fpdi = new Fpdi();
-                $pageCount = $fpdi->setSourceFile($pdfAbsPath);
-                $selectedPages = $this->parsePages($pages, $pageCount);
-
-                for ($c = 0; $c < $copies; $c++) {
-                    foreach ($selectedPages as $pageNo) {
-                        $templateId = $fpdi->importPage($pageNo);
-                        $size = $fpdi->getTemplateSize($templateId);
-                        $orientation = $size['width'] > $size['height'] ? 'L' : 'P';
-                        
-                        $fpdi->AddPage($orientation, [$size['width'], $size['height']]);
-                        $fpdi->useTemplate($templateId);
-                    }
-                }
-
-                $fpdi->Output('F', $customAbsPath);
-                return $customRelativePath;
-
-            } catch (\Throwable $e) {
-                logger()->error('Gagal memproses filter/penggandaan PDF: ' . $e->getMessage());
-                return $pdfRelativePath;
-            }
+        if (!file_exists($pdfAbsPath)) {
+            throw new Exception('Gagal konversi PDF via LibreOffice.');
         }
 
         return $pdfRelativePath;
     }
 
-    /**
-     * 🎯 HELPER: Memecah input string halaman menjadi array angka
-     */
-    private function parsePages(string $pagesStr, int $maxPages): array
+    private function injectTorBarangVariables(TemplateProcessor $templateProcessor, array $variables): void
     {
-        if (strtolower(trim($pagesStr)) === 'all' || empty($pagesStr)) {
-            return range(1, $maxPages);
-        }
+        $templateProcessor->setValue('nama_penyerah', $variables['nama_penyerah'] ?? $variables['penyerah'] ?? '');
+        $templateProcessor->setValue('bidang1', $variables['bidang1'] ?? $variables['bidang_penyerah'] ?? '');
+        $templateProcessor->setValue('nama_penerima', $variables['nama_penerima'] ?? $variables['penerima'] ?? '');
+        $templateProcessor->setValue('bidang2', $variables['bidang2'] ?? $variables['bidang_penerima'] ?? '');
+    }
 
-        $selectedPages = [];
-        $pagesStr = str_replace(' ', '', $pagesStr);
-        $parts = explode(',', $pagesStr);
+    /**
+     * Disesuaikan dengan template baru (${foto_1} & ${foto_2}) + Duplikat Baris Otomatis
+     */
+    private function injectLampiranFotoBarang(TemplateProcessor $templateProcessor, array $validPhotos): void
+    {
+        $photoCount = count($validPhotos);
 
-        foreach ($parts as $part) {
-            if (str_contains($part, '-')) {
-                $range = explode('-', $part);
-                if (count($range) === 2) {
-                    $start = (int)$range[0];
-                    $end = (int)$range[1];
-                    $start = max(1, min($start, $maxPages));
-                    $end = max(1, min($end, $maxPages));
-                    
-                    if ($start <= $end) {
-                        for ($i = $start; $i <= $end; $i++) {
-                            $selectedPages[] = $i;
-                        }
+        if ($photoCount > 0) {
+            $kolomPerBaris = 2;
+            $rowsNeeded    = (int)ceil($photoCount / $kolomPerBaris);
+
+            try {
+                // Duplikat baris berdasarkan placeholder foto_1
+                $templateProcessor->cloneRow('foto_1', $rowsNeeded);
+
+                for ($row = 1; $row <= $rowsNeeded; $row++) {
+                    $idxKiri  = ($row - 1) * $kolomPerBaris;     // Foto 1, 3, 5...
+                    $idxKanan = $idxKiri + 1;                   // Foto 2, 4, 6...
+
+                    // Foto Kiri (${foto_1#1}, ${foto_1#2}, dst)
+                    if (isset($validPhotos[$idxKiri])) {
+                        $pKiri = $validPhotos[$idxKiri];
+                        $templateProcessor->setImageValue("foto_1#{$row}", [
+                            'path'   => public_path($pKiri['path']),
+                            'width'  => 450,
+                            'height' => 250,
+                            'ratio'  => true
+                        ]);
+                    } else {
+                        $templateProcessor->setValue("foto_1#{$row}", '');
+                    }
+
+                    // Foto Kanan (${foto_2#1}, ${foto_2#2}, dst)
+                    if (isset($validPhotos[$idxKanan])) {
+                        $pKanan = $validPhotos[$idxKanan];
+                        $templateProcessor->setImageValue("foto_2#{$row}", [
+                            'path'   => public_path($pKanan['path']),
+                            'width'  => 450,
+                            'height' => 250,
+                            'ratio'  => true
+                        ]);
+                    } else {
+                        $templateProcessor->setValue("foto_2#{$row}", '');
                     }
                 }
-            } else {
-                $page = (int)$part;
-                if ($page >= 1 && $page <= $maxPages) {
-                    $selectedPages[] = $page;
+            } catch (Throwable $e) {
+                // Fallback jika cloneRow gagal/template tidak mendukung clone
+                for ($i = 1; $i <= 10; $i++) {
+                    $idx = $i - 1;
+                    if (isset($validPhotos[$idx])) {
+                        try {
+                            $templateProcessor->setImageValue("foto_{$i}", [
+                                'path'   => public_path($validPhotos[$idx]['path']),
+                                'width'  => 450,
+                                'height' => 250,
+                                'ratio'  => true
+                            ]);
+                        } catch (Throwable $ex) {
+                            $templateProcessor->setValue("foto_{$i}", '');
+                        }
+                    } else {
+                        $templateProcessor->setValue("foto_{$i}", '');
+                    }
                 }
             }
+        } else {
+            // Bersihkan semua tag jika tidak ada foto
+            for ($i = 1; $i <= 10; $i++) {
+                $templateProcessor->setValue("foto_{$i}", '');
+            }
+            $templateProcessor->setValue('foto_kiri', '');
+            $templateProcessor->setValue('foto_kanan', '');
         }
-
-        $selectedPages = array_unique($selectedPages);
-        sort($selectedPages);
-
-        return empty($selectedPages) ? range(1, $maxPages) : $selectedPages;
     }
 }

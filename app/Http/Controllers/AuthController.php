@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Http\Controllers\Controller;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -45,7 +44,7 @@ class AuthController extends Controller
         return response()->json([
             'token' => $token,
             'user' => [
-                'nama' => $user->karyawan->nama, // Mengambil nama dari tabel karyawan lewat relasi
+                'nama' => $user->karyawan->nama_lengkap, // Mengambil nama dari tabel karyawan lewat relasi
                 'role' => $user->role,
             ]
         ], 200);

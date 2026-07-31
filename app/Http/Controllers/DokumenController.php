@@ -9,9 +9,46 @@ use App\Models\Template;
 use PhpOffice\PhpWord\TemplateProcessor; 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Carbon\Carbon; // 🎯 Import Carbon untuk filter tanggal
 
 class DokumenController extends Controller
 {
+    /**
+     * Mengambil daftar dokumen KHUSUS 7 HARI TERAKHIR
+     * (Filter berdasarkan jenis_dokumen_id jika ada)
+     */
+    public function index(Request $request)
+    {
+        try {
+            // 🎯 Hitung tanggal 7 hari yang lalu dari hari ini (Format: YYYY-MM-DD)
+            $tujuhHariLalu = Carbon::now()->subDays(7)->format('Y-m-d');
+
+            // 🎯 Query hanya mengambil data tanggal_dokumen >= 7 hari lalu
+            $query = Dokumen::with(['user', 'items'])
+                ->where('tanggal_dokumen', '>=', $tujuhHariLalu);
+
+            if ($request->has('jenis_dokumen_id') && !empty($request->jenis_dokumen_id)) {
+                $query->where('jenis_dokumen_id', $request->jenis_dokumen_id);
+            }
+
+            if ($request->has('jenis') && !empty($request->jenis)) {
+                $query->where('jenis', $request->jenis);
+            }
+
+            $dokumen = $query->latest()->get();
+
+            return response()->json([
+                'success' => true,
+                'data'    => $dokumen
+            ], 200);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal mengambil data dokumen: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
     /**
      * Menyimpan data dokumen baru dan generate file word otomatis
      */
@@ -97,14 +134,13 @@ class DokumenController extends Controller
                 $itemsData = json_decode($itemsData, true);
             }
 
-            // Simpan Header ke tabel 'dokumen' (KOLOM CATATAN SUDAH DIHAPUS DARI SINI)
+            // Simpan Header ke tabel 'dokumen'
             $dokumen = Dokumen::create([
                 'template_id'       => $request->template_id,
                 'user_id'           => $userIdFinal, 
                 'jenis_dokumen_id'  => $request->jenis_dokumen_id,
                 'nomor_dokumen'     => $request->no_dokumen,
-                'jenis'             => $jenisFinal,                
-                'status'            => $statusFinal,               
+                'jenis'             => $jenisFinal,                              
                 'tanggal_dokumen'   => $request->tanggal_dokumen ?? date('Y-m-d'),
                 'penyerah_id'       => $request->penyerah_id,
                 'penerima_id'       => $request->penerima_id,
@@ -114,7 +150,7 @@ class DokumenController extends Controller
                 'status_aktif'      => 1
             ]);
 
-            // Simpan detail item ke tabel 'dokumen_item' menggunakan hasil parsing $itemsData yang aman
+            // Simpan detail item ke tabel 'dokumen_item'
             if (is_array($itemsData) && count($itemsData) > 0) {
                 foreach ($itemsData as $item) {
                     DokumenItem::create([
@@ -161,6 +197,37 @@ class DokumenController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'Gagal mengambil data counter: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Menghapus dokumen (Dibutuhkan oleh route DELETE /dokumen/{id})
+     */
+    public function destroy($id)
+    {
+        try {
+            $dokumen = Dokumen::findOrFail($id);
+
+            // Hapus file fisik jika ada
+            if ($dokumen->file_sblm_print && file_exists(public_path($dokumen->file_sblm_print))) {
+                @unlink(public_path($dokumen->file_sblm_print));
+            }
+
+            // Hapus relasi items dan foto
+            DokumenItem::where('dokumen_id', $id)->delete();
+            DokumenFoto::where('dokumen_id', $id)->delete();
+            
+            $dokumen->delete();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Dokumen berhasil dihapus permanen.'
+            ], 200);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal menghapus dokumen: ' . $e->getMessage()
             ], 500);
         }
     }

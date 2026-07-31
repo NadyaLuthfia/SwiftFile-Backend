@@ -26,21 +26,21 @@ Route::post('/login', [AuthController::class, 'login']);
 Route::middleware('auth:sanctum')->group(function () {
     
     Route::get('/user', function (Request $request) {
-        return $request->user();
+        return $request->user()->load('karyawan');
     });
 
     // =========================================================================
-    // 🟢 KELOMPOK 1: AKSES UMUM (BISA DIAKSES SEMUA ROLE: USER, ADMIN, MASTER_ADMIN)
+    // 🔓 KELOMPOK 1: AKSES UMUM (BISA DIAKSES SEMUA ROLE: USER, ADMIN, MASTER_ADMIN)
     // =========================================================================
     Route::middleware('role:master_admin,admin,user')->group(function () {
         // Dashboard & Arsip
         Route::get('/dashboard/stats', [DashboardController::class, 'dashboardStats']);
         Route::get('/arsip-history', [ArsipController::class, 'index']);
 
-        // 🌟 ROUTE TEMPLATE (Akses Umum)
+        // 📄 ROUTE TEMPLATE (Akses Umum)
         Route::get('/templates', [TemplateController::class, 'index']);
-        Route::get('/templates/{id}', [TemplateController::class, 'show']); // 👈 1. Ambil spesifik (bisa file lama)
-        Route::get('/templates/terbaru/{jenis_dokumen_id}', [TemplateController::class, 'getLatestByJenis']); // 👈 2. Ambil otomatis terbaru berdasarkan jenisnya
+        Route::get('/templates/{id}', [TemplateController::class, 'show']); // 🎯 1. Ambil spesifik (bisa file lama)
+        Route::get('/templates/terbaru/{jenis_dokumen_id}', [TemplateController::class, 'getLatestByJenis']); // 🎯 2. Ambil otomatis terbaru berdasarkan jenisnya
         Route::get('/templates/{id}/variables', [TemplateController::class, 'getVariables']);
 
         // Draft
@@ -60,6 +60,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/siap-cetak/{id}/download', [SiapCetakController::class, 'download']);
         Route::post('/siap-cetak/{id}/upload', [ArsipController::class, 'uploadBukti']);
         Route::post('/siap-cetak/{id}/selesai', [ArsipController::class, 'selesaiSuratTugas']);
+        Route::post('/siap-cetak/{id}/cetak-lagi', [ArsipController::class, 'cetakLagi']);
 
         // Dropdown Data
         Route::get('/jabatan', [JabatanController::class, 'index']);
@@ -69,14 +70,15 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/karyawan', [KaryawanController::class, 'index']);
         Route::get('/karyawan/{id}', [KaryawanController::class, 'show']);
 
-        // Autocomplete Counter
+        // 🎯 ROUTE DOKUMEN (Get List Dokumen untuk Excel, Counter, dan Store)
+        Route::get('/dokumen', [DokumenController::class, 'index']);
         Route::get('/next-counter', [DokumenController::class, 'nextCounter']);
         Route::get('/dokumen/next-counter', [DokumenController::class, 'nextCounter']);
         Route::post('/dokumen/store', [DokumenController::class, 'store']);
     });
 
     // =========================================================================
-    // 🟡 KELOMPOK 2: MASTER CREATION & MANAGEMENT (ADMIN & MASTER_ADMIN)
+    // 🛠️ KELOMPOK 2: MASTER CREATION & MANAGEMENT (ADMIN & MASTER_ADMIN)
     // =========================================================================
     Route::middleware('role:master_admin,admin')->group(function () {
         Route::get('/monitoring-all', [MonitoringController::class, 'monitoringAll']);
@@ -98,7 +100,7 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     // =========================================================================
-    // 🔴 KELOMPOK 3: DESTRUCTIVE ACTIONS (HANYA MASTER_ADMIN!)
+    // ⛔ KELOMPOK 3: DESTRUCTIVE ACTIONS (HANYA MASTER_ADMIN!)
     // =========================================================================
     Route::middleware('role:master_admin')->group(function () {
         Route::delete('/dokumen/{id}', [DokumenController::class, 'destroy']);
