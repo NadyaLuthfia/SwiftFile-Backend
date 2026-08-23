@@ -15,7 +15,8 @@ class Draft extends Model
         'template_id', 
         'nama_draft', 
         'no_dokumen', // 👈 Tambahkan ini agar nomor otomatis tersimpan
-        'data_input'
+        'data_input',
+        'assigned_to_id'
     ];
 
     // 🚨 KUNCI SAKTI 2: Otomatis mengubah JSON database menjadi Array PHP biasa
@@ -27,12 +28,6 @@ class Draft extends Model
     public function template()
     {
         return $this->belongsTo(Template::class);
-    }
-
-    // 🌟 RELASI BARU: Satu draf bisa memiliki banyak item barang (1 to Many)
-    public function items()
-    {
-        return $this->hasMany(DokumenItem::class, 'dokumen_id');
     }
 
     public function user()

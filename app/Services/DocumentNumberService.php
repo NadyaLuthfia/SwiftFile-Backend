@@ -56,13 +56,23 @@ class DocumentNumberService
         $suratTugasIds = Template::where('nama', 'like', '%surat tugas%')->pluck('id');
         $torIds        = Template::where('nama', 'like', '%tor%')->pluck('id');
 
-        $query = DB::table('dokumen_cetak')->whereYear('created_at', $tahun);
-
         // E. Percabangan Jalur Nomor Urut
         if ($isSuratTugas) {
             // 1. Jalur Khusus Surat Tugas
             $kodeFormat = 'SPPD/O';
-            $totalCetak = $query->whereIn('template_id', $suratTugasIds)->count();
+            
+            // 🔥 UBAHAN KHUSUS SURAT TUGAS: Gabungin jumlah yang ngantri cetak + yang udah di arsip
+            $jmlCetak = DB::table('dokumen_cetak')
+                            ->whereYear('created_at', $tahun)
+                            ->whereIn('template_id', $suratTugasIds)
+                            ->count();
+                            
+            $jmlArsip = DB::table('dokumen')
+                            ->whereYear('created_at', $tahun)
+                            ->whereIn('template_id', $suratTugasIds)
+                            ->count();
+            
+            $totalCetak = $jmlCetak + $jmlArsip;
             $noUrut     = str_pad($totalCetak + 1, 3, '0', STR_PAD_LEFT);
 
             $nomorSuratLengkap = "{$noUrut}/BTG-{$bulanRomawi}/{$kodeFormat}/{$tahun}";
@@ -78,7 +88,19 @@ class DocumentNumberService
         } else {
             // 3. Jalur Khusus BA (Kecualikan Surat Tugas DAN TOR)
             $kodeFormat = 'BA';
-            $totalCetak = $query->whereNotIn('template_id', $suratTugasIds->merge($torIds))->count();
+            
+            // 🔥 UBAHAN KHUSUS BA: Gabungin jumlah yang ngantri cetak + yang udah di arsip
+            $jmlCetak = DB::table('dokumen_cetak')
+                            ->whereYear('created_at', $tahun)
+                            ->whereNotIn('template_id', $suratTugasIds->merge($torIds))
+                            ->count();
+                            
+            $jmlArsip = DB::table('dokumen')
+                            ->whereYear('created_at', $tahun)
+                            ->whereNotIn('template_id', $suratTugasIds->merge($torIds))
+                            ->count();
+            
+            $totalCetak = $jmlCetak + $jmlArsip;
             $noUrut     = str_pad($totalCetak + 1, 3, '0', STR_PAD_LEFT);
 
             $nomorSuratLengkap = "{$noUrut}/BTG-{$bulanRomawi}/{$kodeFormat}/{$tahun}";

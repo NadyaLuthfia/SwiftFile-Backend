@@ -19,7 +19,6 @@ class DokumenCetak extends Model
         'nama_dokumen',
         'variables',     // Sesuaikan dengan nama kolom di database kamu (variables / data_input)
         'file_path',
-        'foto_ttd',
         'status_aktif'
     ];
 

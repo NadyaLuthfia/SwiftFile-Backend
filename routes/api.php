@@ -55,10 +55,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/siap-cetak', [SiapCetakController::class, 'index']);
         Route::post('/generate-docx', [TemplateController::class, 'generateDocx']);
         Route::post('/siap-cetak', [SiapCetakController::class, 'store']);
-        Route::put('/siap-cetak/{id}', [SiapCetakController::class, 'update']);
         Route::put('/siap-cetak/{id}/status', [SiapCetakController::class, 'updateStatus']);
         Route::get('/siap-cetak/{id}/download', [SiapCetakController::class, 'download']);
-        Route::post('/siap-cetak/{id}/upload', [ArsipController::class, 'uploadBukti']);
         Route::post('/siap-cetak/{id}/selesai', [ArsipController::class, 'selesaiSuratTugas']);
         Route::post('/siap-cetak/{id}/cetak-lagi', [ArsipController::class, 'cetakLagi']);
 
@@ -114,7 +112,13 @@ Route::middleware('auth:sanctum')->group(function () {
         // Hapus & Nonaktifkan User
         Route::delete('/users/{id}', [UserController::class, 'destroy']);
         Route::post('/users/{id}/toggle-status', [UserController::class, 'toggleStatus']);
+        
+        // Monitoring & Arsip
         Route::post('/arsip-history/{id}/toggle-aktif', [ArsipController::class, 'toggleAktif']);
+        Route::post('/monitoring/{id}/toggle-status', [MonitoringController::class, 'toggleStatus']);
+        
+        // 🔴 INI ROUTE DELETE YANG BARU DITAMBAHKAN
+        Route::delete('/monitoring/{id}', [MonitoringController::class, 'destroy']);
     });
 
 });

@@ -115,21 +115,29 @@ class DraftController extends Controller
 
         if ($user) {
             $query->where(function($q) use ($user) {
-                $q->where('user_id', $user->id);
+                // Tambahin awalan 'drafts.' biar database gak bingung
+                $q->where('drafts.user_id', $user->id)
+                  ->orWhere('drafts.assigned_to_id', $user->id); 
                 
                 $identity = $user->name ?? $user->username ?? $user->nama ?? null;
                 if (!empty($identity)) {
-                    $q->orWhereRaw("LOWER(data_input) LIKE ?", ['%"nama_penanggung":"' . strtolower($identity) . '"%']);
+                    $q->orWhereRaw("LOWER(drafts.data_input) LIKE ?", ['%"nama_penanggung":"' . strtolower($identity) . '"%']);
                 }
             });
         }
 
         $drafts = $query->get();
-        return response()->json([ 'status' => 'success', 'data' => $drafts ], 200);
+        
+        // 🚨 KACAMATA X-RAY: Biar kita tau Laravel ngebaca ID kamu berapa!
+        return response()->json([ 
+            'status' => 'success', 
+            'ID_YANG_LAGI_LOGIN' => $user ? $user->id : 'TIDAK TERDETEKSI', 
+            'data' => $drafts 
+        ], 200);
     }
 
     /**
-     * 🔍 Mengambil satu data draft spesifik
+     * 🔍 Mengambil satu data draft spesifik (Untuk Form Edit React)
      */
     public function show(Request $request, $id)
     {
@@ -139,7 +147,9 @@ class DraftController extends Controller
 
             if ($user && strtolower($user->role) === 'user') {
                 $query->where(function($q) use ($user) {
-                    $q->where('user_id', $user->id);
+                    // 👈 FIX: Beri akses "lihat" ke form edit untuk penanggung jawab
+                    $q->where('user_id', $user->id)
+                      ->orWhere('assigned_to_id', $user->id);
                     
                     $identity = $user->name ?? $user->username ?? $user->nama ?? null;
                     if (!empty($identity)) {
@@ -149,6 +159,44 @@ class DraftController extends Controller
             }
 
             $draft = $query->findOrFail($id);
+
+            // 🔓 UNBOXING DATA INPUT: Ratakan variables & isian ke root level
+            $dataInput = is_string($draft->data_input) ? json_decode($draft->data_input, true) : (array)$draft->data_input;
+
+            if (isset($dataInput['variables'])) {
+                $vars = is_string($dataInput['variables']) ? json_decode($dataInput['variables'], true) : (array)$dataInput['variables'];
+                if (is_array($vars)) {
+                    $dataInput = array_merge($vars, $dataInput);
+                }
+            }
+
+            if (isset($dataInput['isian'])) {
+                $isian = is_string($dataInput['isian']) ? json_decode($dataInput['isian'], true) : (array)$dataInput['isian'];
+                if (is_array($isian)) {
+                    $dataInput = array_merge($isian, $dataInput);
+                }
+            }
+
+            // 🖼️ FORMAT URL FOTO DRAFT UNTUK PREVIEW REACT
+            if (isset($dataInput['foto']) && is_array($dataInput['foto'])) {
+                $formattedPhotos = [];
+                foreach ($dataInput['foto'] as $fotoItem) {
+                    if (is_array($fotoItem) && isset($fotoItem['path'])) {
+                        $fotoItem['full_url'] = asset($fotoItem['path']);
+                        $formattedPhotos[] = $fotoItem;
+                    } elseif (is_string($fotoItem) && !empty($fotoItem)) {
+                        $formattedPhotos[] = [
+                            'path'       => $fotoItem,
+                            'full_url'   => asset($fotoItem),
+                            'keterangan' => 'Foto Lampiran'
+                        ];
+                    }
+                }
+                $dataInput['foto'] = $formattedPhotos;
+            }
+
+            $draft->data_input = $dataInput;
+
             return response()->json([ 'status' => 'success', 'data' => $draft ], 200);
             
         } catch (\Exception $e) {
@@ -160,7 +208,7 @@ class DraftController extends Controller
     }
 
     /**
-     * 📥 Menyimpan draft baru ke database
+     * 📥 TOMBOL "SIMPAN DRAFT" (BUAT BARU)
      */
     public function store(Request $request)
     {
@@ -170,13 +218,58 @@ class DraftController extends Controller
 
         $isianVariabel = $request->except(['template_id', '_token']);
 
-        if ($request->hasFile('rincian_barang')) {
-            foreach ($request->file('rincian_barang') as $index => $item) {
-                if (isset($item['foto'])) {
-                    $path = $item['foto']->store('draft_images', 'public');
-                    $isianVariabel['rincian_barang'][$index]['foto'] = $path;
+        // 🔓 Ratakan jika terbungkus
+        if (isset($isianVariabel['variables'])) {
+            $vars = is_string($isianVariabel['variables']) ? json_decode($isianVariabel['variables'], true) : (array)$isianVariabel['variables'];
+            unset($isianVariabel['variables']);
+            if (is_array($vars)) {
+                $isianVariabel = array_merge($vars, $isianVariabel);
+            }
+        }
+
+        if (isset($isianVariabel['isian'])) {
+            $isian = is_string($isianVariabel['isian']) ? json_decode($isianVariabel['isian'], true) : (array)$isianVariabel['isian'];
+            unset($isianVariabel['isian']);
+            if (is_array($isian)) {
+                $isianVariabel = array_merge($isian, $isianVariabel);
+            }
+        }
+
+        // 📷 Handle Upload Foto Lampiran / Foto Barang ke uploads/lampiran
+        $photoField = $request->hasFile('foto') ? 'foto' : ($request->hasFile('foto_barang') ? 'foto_barang' : null);
+
+        if ($photoField) {
+            $dirPath = public_path('uploads/lampiran');
+            if (!is_dir($dirPath)) {
+                @mkdir($dirPath, 0777, true);
+            }
+
+            $uploadedPhotos = [];
+            $files = is_array($request->file($photoField)) ? $request->file($photoField) : [$request->file($photoField)];
+
+            foreach ($files as $file) {
+                if ($file && $file->isValid()) {
+                    $filename = time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+                    $file->move($dirPath, $filename);
+
+                    $uploadedPhotos[] = [
+                        'path'       => 'uploads/lampiran/' . $filename,
+                        'keterangan' => 'Foto Lampiran'
+                    ];
                 }
             }
+
+            if (!empty($uploadedPhotos)) {
+                $isianVariabel['foto'] = $uploadedPhotos;
+            }
+        }
+
+        // 🕵️ FIX BARU: Cari ID User berdasarkan ID Karyawan dari Frontend
+        $realUserId = null;
+        if ($request->assigned_to_id) {
+            $realUserId = DB::table('users')
+                            ->where('karyawan_id', $request->assigned_to_id)
+                            ->value('id');
         }
 
         $draft = Draft::create([
@@ -184,7 +277,8 @@ class DraftController extends Controller
             'template_id'  => $request->template_id,
             'nama_draft'   => 'PENDING', 
             'no_dokumen'   => 'PENDING_NUMBER', 
-            'data_input'   => json_encode($isianVariabel)
+            'data_input'   => json_encode($isianVariabel),
+            'assigned_to_id' => $realUserId // 👈 Menyimpan ID dari tabel users
         ]);
 
         $this->sinkronkanNomorOtomatis($draft);
@@ -193,7 +287,7 @@ class DraftController extends Controller
     }
 
     /**
-     * 📝 Mengubah data draft
+     * 📝 TOMBOL "SIMPAN DRAFT" (EDIT / UPDATE DRAFT LAMA)
      */
     public function update(Request $request, $id)
     {
@@ -204,7 +298,9 @@ class DraftController extends Controller
         $dataInputOld = is_array($draft->data_input) ? $draft->data_input : json_decode($draft->data_input, true);
         $namaPenanggung = $dataInputOld['nama_penanggung'] ?? '';
 
+        // 👈 FIX: Tambah bypass validasi agar penanggung jawab bisa update data
         $hasAccess = ($draft->user_id == $user->id) || 
+                     ($draft->assigned_to_id == $user->id) || 
                     (!empty($identity) && strtolower($namaPenanggung) === strtolower($identity));
 
         if (!$hasAccess) {
@@ -214,7 +310,68 @@ class DraftController extends Controller
             ], 403);
         }
 
-        $isianVariabel = $request->except(['template_id', '_token', '_method']);
+        $isianVariabel = $request->except(['template_id', '_token', '_method', 'foto_lama']);
+
+        // 🔓 Unboxing data terbungkus
+        if (isset($isianVariabel['variables'])) {
+            $vars = is_string($isianVariabel['variables']) ? json_decode($isianVariabel['variables'], true) : (array)$isianVariabel['variables'];
+            unset($isianVariabel['variables']);
+            if (is_array($vars)) $isianVariabel = array_merge($vars, $isianVariabel);
+        }
+
+        if (isset($isianVariabel['isian'])) {
+            $isian = is_string($isianVariabel['isian']) ? json_decode($isianVariabel['isian'], true) : (array)$isianVariabel['isian'];
+            unset($isianVariabel['isian']);
+            if (is_array($isian)) $isianVariabel = array_merge($isian, $isianVariabel);
+        }
+
+        // 🖼️ 1. AMBIL FOTO LAMA YANG DITERUSKAN DARI FE
+        $fotoFinal = [];
+        if ($request->has('foto_lama')) {
+            $fotoLama = json_decode($request->foto_lama, true);
+            if (is_array($fotoLama)) {
+                $fotoFinal = $fotoLama;
+            }
+        } elseif (isset($dataInputOld['foto'])) {
+            $fotoFinal = $dataInputOld['foto'];
+        }
+
+        // 📷 2. UPLOAD FOTO BARU
+        $photoField = $request->hasFile('foto') ? 'foto' : ($request->hasFile('foto_barang') ? 'foto_barang' : null);
+
+        if ($photoField) {
+            $dirPath = public_path('uploads/lampiran');
+            if (!is_dir($dirPath)) {
+                @mkdir($dirPath, 0777, true);
+            }
+
+            $files = is_array($request->file($photoField)) ? $request->file($request->photoField) : [$request->file($photoField)];
+
+            foreach ($files as $file) {
+                if ($file && $file->isValid()) {
+                    $filename = time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+                    $file->move($dirPath, $filename);
+
+                    $fotoFinal[] = [
+                        'path'       => 'uploads/lampiran/' . $filename,
+                        'keterangan' => 'Foto Lampiran'
+                    ];
+                }
+            }
+        }
+
+        if (!empty($fotoFinal)) {
+            $isianVariabel['foto'] = $fotoFinal;
+        }
+
+        // 👈 FIX BARU: Update assigned_to_id dengan nyari ke table 'users' dulu
+        if ($request->has('assigned_to_id')) {
+            $realUserId = DB::table('users')
+                            ->where('karyawan_id', $request->assigned_to_id)
+                            ->value('id');
+                            
+            $draft->assigned_to_id = $realUserId; // 👈 Sistem masukin ID dari table users!
+        }
 
         $draft->data_input = json_encode($isianVariabel);
         $draft->save();
@@ -237,6 +394,7 @@ class DraftController extends Controller
             $user = $request->user();
             $draft = Draft::findOrFail($id);
 
+            // Tetap hanya user pembuat yang berhak menghapus draft
             if ($user && strtolower($user->role) === 'user' && $draft->user_id !== $user->id) {
                 return response()->json([ 'success' => false, 'message' => 'Anda tidak memiliki hak akses untuk menghapus draft ini.' ], 403);
             }
@@ -244,6 +402,16 @@ class DraftController extends Controller
             $isianData = is_string($draft->data_input) ? json_decode($draft->data_input, true) : $draft->data_input;
 
             if (is_array($isianData)) {
+                // Hapus foto di public/uploads/lampiran
+                if (isset($isianData['foto']) && is_array($isianData['foto'])) {
+                    foreach ($isianData['foto'] as $fotoItem) {
+                        if (isset($fotoItem['path']) && file_exists(public_path($fotoItem['path']))) {
+                            @unlink(public_path($fotoItem['path']));
+                        }
+                    }
+                }
+
+                // Fallback untuk file lama yang masih ada di storage/app/public/draft_images
                 foreach ($isianData as $value) {
                     if (is_string($value) && str_contains($value, 'draft_images/') && Storage::disk('public')->exists($value)) {
                         Storage::disk('public')->delete($value);

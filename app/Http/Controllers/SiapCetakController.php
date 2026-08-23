@@ -82,6 +82,10 @@ class SiapCetakController extends Controller
         }
     }
 
+    /**
+     * KHUSUS TOMBOL "Selesai & Kirim Ke Antrean"
+     * Dipakai saat membuat dokumen baru MAUPUN menyelesaikan dari draft.
+     */
     public function store(Request $request)
     {
         $validator = Validator::make($request->all(), [
@@ -102,16 +106,21 @@ class SiapCetakController extends Controller
         try {
             $variables = is_string($request->variables) ? json_decode($request->variables, true) : (array)$request->variables;
 
-            // =========================================================================
-            // TAMBAHAN: OLAH FOTO UPLOAD & MASUKKAN KE ARRAY $variables['foto']
-            // =========================================================================
+            // 📷 1. AMBIL FOTO LAMA DARI DRAFT (JIKA ADA)
+            $fotoLama = [];
+            if ($request->has('foto_lama')) {
+                $rawFotoLama = $request->input('foto_lama');
+                $fotoLama = is_string($rawFotoLama) ? json_decode($rawFotoLama, true) : (array)$rawFotoLama;
+            }
+
+            // 📷 2. OLAH FOTO BARU YANG DI-UPLOAD
+            $uploadedPhotos = [];
             if ($request->hasFile('foto')) {
                 $dirPath = public_path('uploads/lampiran');
                 if (!is_dir($dirPath)) {
                     @mkdir($dirPath, 0777, true);
                 }
 
-                $uploadedPhotos = [];
                 $files = is_array($request->file('foto')) ? $request->file('foto') : [$request->file('foto')];
 
                 foreach ($files as $file) {
@@ -125,18 +134,22 @@ class SiapCetakController extends Controller
                         ];
                     }
                 }
-
-                if (!empty($uploadedPhotos)) {
-                    $variables['foto'] = $uploadedPhotos;
-                }
             }
 
+            // 🌟 3. GABUNGKAN FOTO LAMA + FOTO BARU KE VARIABLES
+            $semuaFoto = array_merge((array)$fotoLama, $uploadedPhotos);
+            if (!empty($semuaFoto)) {
+                $variables['foto'] = $semuaFoto;
+            }
+
+            // Generate nomor dokumen & periode bulan/tahun
             $numData = $this->numberService->generate($request->template_id);
 
             $variables['no'] = $numData['no'];
             $variables['bulan'] = $numData['bulan_teks'];
             $variables['tahun'] = $numData['tahun'];
 
+            // Simpan ke Antrean Siap Cetak (DokumenCetak)
             $siapCetak = DokumenCetak::create([
                 'user_id'      => $request->user()->id,
                 'template_id'  => $request->template_id,
@@ -149,8 +162,11 @@ class SiapCetakController extends Controller
             $siapCetak->file_path = $filePathFisik;
             $siapCetak->save();
 
-            // Generate PDF awal sebagai snapshot
-            $this->documentService->generatePdf($siapCetak);
+            // Jika penyelesaian ini berasal dari draft, hapus draft lamanya dari tabel 'drafts'
+            $draftId = $request->input('draft_id') ?? ($variables['draft_id'] ?? null);
+            if ($draftId) {
+                DB::table('drafts')->where('id', $draftId)->delete();
+            }
 
             DB::commit();
 
@@ -158,133 +174,13 @@ class SiapCetakController extends Controller
 
             return response()->json([
                 'status' => 'success',
-                'message' => 'Data draft, file Word & PDF berhasil dibuat!',
+                'message' => 'Dokumen selesai dan berhasil dikirim ke antrean cetak!',
                 'data' => $siapCetak
             ], 201);
 
         } catch (Throwable $e) {
             DB::rollBack();
-            return response()->json(['status' => 'error', 'message' => 'Gagal menyimpan draft.', 'error' => $e->getMessage()], 500);
-        }
-    }
-
-    public function update(Request $request, $id)
-    {
-        DB::beginTransaction();
-
-        try {
-            $newVariables = is_string($request->variables) ? json_decode($request->variables, true) : (array)$request->variables;
-            $status = $request->input('status', $newVariables['status'] ?? 'draft');
-
-            // =========================================================================
-            // TAMBAHAN: OLAH FOTO JIKA ADA FOTO BARU SAAT UPDATE
-            // =========================================================================
-            if ($request->hasFile('foto')) {
-                $dirPath = public_path('uploads/lampiran');
-                if (!is_dir($dirPath)) {
-                    @mkdir($dirPath, 0777, true);
-                }
-
-                $uploadedPhotos = [];
-                $files = is_array($request->file('foto')) ? $request->file('foto') : [$request->file('foto')];
-
-                foreach ($files as $file) {
-                    if ($file->isValid()) {
-                        $filename = time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
-                        $file->move($dirPath, $filename);
-
-                        $uploadedPhotos[] = [
-                            'path'       => 'uploads/lampiran/' . $filename,
-                            'keterangan' => 'Foto Lampiran'
-                        ];
-                    }
-                }
-
-                if (!empty($uploadedPhotos)) {
-                    $newVariables['foto'] = $uploadedPhotos;
-                }
-            }
-
-            $draft = DB::table('drafts')->where('id', $id)->first();
-
-            if ($draft) {
-                if ($status === 'siap_cetak') {
-                    $templateId = $request->template_id ?? $draft->template_id;
-
-                    $numData = $this->numberService->generate($templateId);
-                    $newVariables['no'] = $numData['no'];
-                    $newVariables['bulan'] = $numData['bulan_teks'];
-                    $newVariables['tahun'] = $numData['tahun'];
-
-                    $siapCetak = DokumenCetak::create([
-                        'user_id'      => $request->user()->id,
-                        'template_id'  => $templateId,
-                        'nama_dokumen' => $numData['nama_dokumen_final'],
-                        'variables'    => $newVariables,
-                    ]);
-
-                    // Generate file Word & PDF pertama kali saat status berubah jadi siap_cetak
-                    $filePathFisik = $this->documentService->generate($siapCetak);
-                    $siapCetak->file_path = $filePathFisik;
-                    $siapCetak->save();
-
-                    $this->documentService->generatePdf($siapCetak);
-
-                    DB::table('drafts')->where('id', $id)->delete();
-
-                    DB::commit();
-
-                    return response()->json([
-                        'status' => 'success',
-                        'message' => 'Dokumen selesai dan berhasil dipindah ke Siap Cetak!',
-                        'data' => $siapCetak
-                    ], 200);
-                } else {
-                    DB::table('drafts')->where('id', $id)->update([
-                        'data_input' => json_encode($newVariables),
-                        'updated_at' => now(),
-                    ]);
-
-                    DB::commit();
-
-                    return response()->json([
-                        'status' => 'success',
-                        'message' => 'Draft berhasil diperbarui!',
-                        'data' => $newVariables
-                    ], 200);
-                }
-            }
-
-            $dokumen = DokumenCetak::findOrFail($id);
-            $oldVariables = is_string($dokumen->variables) ? json_decode($dokumen->variables, true) : (array)$dokumen->variables;
-
-            if (isset($oldVariables['no'])) { 
-                $newVariables['no'] = $oldVariables['no']; 
-            }
-
-            // Jika tidak ada foto baru dikirim, pertahankan foto lama jika ada
-            if (!isset($newVariables['foto']) && isset($oldVariables['foto'])) {
-                $newVariables['foto'] = $oldVariables['foto'];
-            }
-
-            $dokumen->update([
-                'variables' => $newVariables,
-            ]);
-
-            // Re-generate saat benar-benar melakukan UPDATE data secara sengaja
-            $filePathFisik = $this->documentService->generate($dokumen);
-            $dokumen->file_path = $filePathFisik;
-            $dokumen->save();
-
-            $this->documentService->generatePdf($dokumen);
-
-            DB::commit();
-
-            return response()->json(['status' => 'success', 'message' => 'Draft & file dokumen berhasil diperbarui!', 'data' => $dokumen], 200);
-
-        } catch (Throwable $e) {
-            DB::rollBack();
-            return response()->json(['status' => 'error', 'message' => 'Gagal diperbarui data draft: ' . $e->getMessage()], 500);
+            return response()->json(['status' => 'error', 'message' => 'Gagal menyimpan dokumen ke antrean.', 'error' => $e->getMessage()], 500);
         }
     }
 
@@ -292,26 +188,15 @@ class SiapCetakController extends Controller
     {
         try {
             $dokumen = DokumenCetak::findOrFail($id);
-            $now = now();
             
-            if (empty($dokumen->foto_ttd)) {
-                DB::table('dokumen_cetak')
-                    ->where('id', $id)
-                    ->where(function($q) {
-                        $q->whereNull('foto_ttd')->orWhere('foto_ttd', '');
-                    })
-                    ->update([
-                        'tanggal_cetak' => $now,
-                        'updated_at'    => $now
-                    ]);
-
-                $dokumen = DokumenCetak::findOrFail($id);
+            // Catat tanggal cetak jika belum ada
+            if (empty($dokumen->tanggal_cetak)) {
+                $dokumen->tanggal_cetak = now();
+                $dokumen->save();
             }
 
-            // Tentukan perkiraan lokasi relative file PDF dari file_path Word
             $pdfRelativePath = str_replace(['documents/', '.docx'], ['pdfs/', '.pdf'], $dokumen->file_path);
 
-            // ✅ CEK FISIK: Jika PDF belum ada di folder, baru dipanggil generatePdf sekali
             if (empty($pdfRelativePath) || !file_exists(public_path($pdfRelativePath))) {
                 $pdfRelativePath = $this->documentService->generatePdf($dokumen);
             }
@@ -336,13 +221,11 @@ class SiapCetakController extends Controller
             $pdfRelativePath = str_replace(['documents/', '.docx'], ['pdfs/', '.pdf'], $dokumen->file_path);
             $filePathFisik = public_path($pdfRelativePath);
 
-            // Jika file PDF fisik tidak ada, baru fallback ke generatePdf
             if (!file_exists($filePathFisik)) {
                 $pdfRelativePath = $this->documentService->generatePdf($dokumen);
                 $filePathFisik = public_path($pdfRelativePath);
             }
 
-            // Langsung kembalikan file PDF statis yang sudah tersimpan
             return response()->file($filePathFisik, [
                 'Content-Type' => 'application/pdf',
                 'Content-Disposition' => 'inline; filename="' . ($dokumen->nama_dokumen ?? 'dokumen') . '.pdf"'

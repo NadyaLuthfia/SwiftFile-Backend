@@ -23,10 +23,8 @@ class Dokumen extends Model
         'penyerah_id',
         'penerima_id',
         'catatan',
-        'opsi_foto',
         'kolom_tambahan',
-        'file_sblm_print',
-        'file_sesudah_ttd',
+        'file_word',
         'tanggal_cetak',
         'status_aktif'
     ];

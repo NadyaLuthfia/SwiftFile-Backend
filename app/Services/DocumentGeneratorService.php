@@ -32,12 +32,11 @@ class DocumentGeneratorService
             $variables = (array)$variables;
         }
 
-        // 2. Extract rincian barang & item pertama langsung dari JSON
         $rincianBarang = $variables['rincian_barang'] ?? $variables['items'] ?? $variables['rincian'] ?? [];
         $firstItem     = (!empty($rincianBarang) && is_array($rincianBarang)) ? (array)$rincianBarang[0] : [];
 
         // =========================================================================
-        // AMBIL DATA & FORMAT NAMA DOKUMEN (KHUSUS TOR BARANG)
+        // AMBIL DATA & FORMAT NAMA DOKUMEN
         // =========================================================================
         $namaBarang = $variables['nama_barang'] ?? '';
         if (empty($namaBarang) && !empty($firstItem)) {
@@ -46,7 +45,6 @@ class DocumentGeneratorService
 
         $namaPenyerah = $variables['nama_penyerah'] ?? $variables['penyerah'] ?? '';
 
-        // DETEKSI JENIS TEMPLATE
         $namaTemplate = $templateMaster->nama;
         $namaLower    = strtolower($namaTemplate);
         $isSuratTugas = str_contains($namaLower, 'surat tugas');
@@ -55,7 +53,6 @@ class DocumentGeneratorService
 
         $noUrut = $variables['no'] ?? '000';
 
-        // FORMAT NAMA DOKUMEN & FILE
         if ($isTorBarang) {
             $parts = ['TOR Barang'];
             if (!empty($namaBarang)) {
@@ -127,7 +124,6 @@ class DocumentGeneratorService
 
         $templateProcessor = new TemplateProcessor($pathFile);
 
-        // Set variabel tanggal standar
         $templateProcessor->setValue('tanggal_singkat', $tanggalPendek);
         $templateProcessor->setValue('tanggal_hari_saja', $dateObj->format('d'));
         $templateProcessor->setValue('bulan_pembuka', $bulanTeksBiasa);
@@ -137,7 +133,7 @@ class DocumentGeneratorService
         $templateProcessor->setValue('tahun', $tahun);
 
         // =========================================================================
-        // 1. PROSES TABEL RINCIAN MULTI-ROW (100% DARI JSON)
+        // 1. PROSES TABEL RINCIAN MULTI-ROW
         // =========================================================================
         if (!empty($rincianBarang) && is_array($rincianBarang)) {
             try {
@@ -158,7 +154,8 @@ class DocumentGeneratorService
                 $hSatuan    = $arr['harga_satuan'] ?? $arr['price'] ?? $arr['harga'] ?? 1;
                 $totalItem  = $arr['total'] ?? $arr['jumlah_harga'] ?? ($qtyItem * (is_numeric($hSatuan) ? $hSatuan : 1));
 
-                $noFormatted = $isTor ? sprintf('%02d', $r) : sprintf('%03d', $r);
+                // FIX: Ubah format nomor biar jadi 1, 2, 3 murni
+                $noFormatted = $r;
 
                 $templateProcessor->setValue("no#{$r}", $noFormatted);
                 $templateProcessor->setValue("barang#{$r}", $itemBarang);
@@ -170,16 +167,18 @@ class DocumentGeneratorService
         }
 
         // =========================================================================
-        // 2. PROSES HEADER & VARIABEL KEDUA
+        // 2. PROSES HEADER & VARIABEL LAIN
         // =========================================================================
+        // Set nomor dokumen di header ${no} setelah tabel rincian selesai di-clone
+        $templateProcessor->setValue('no', $noUrut);
+
         $templateProcessor->setValue('nama_barang', $variables['nama_barang'] ?? $firstItem['barang'] ?? $firstItem['nama_barang'] ?? '');
         $templateProcessor->setValue('merk', $variables['merk'] ?? '');
         $templateProcessor->setValue('type', $variables['type'] ?? $variables['tipe'] ?? '');
         $templateProcessor->setValue('persyaratan_tambahan', $variables['persyaratan_tambahan'] ?? $firstItem['spesifikasi'] ?? '');
         $templateProcessor->setValue('jumlah', $variables['jumlah'] ?? $firstItem['jumlah'] ?? $firstItem['qty'] ?? '1');
 
-        $spesifikasiVal = $variables['spesifikasi'] ?? $firstItem['spesifikasi'] ?? '';
-        $templateProcessor->setValue('spesifikasi', $spesifikasiVal);
+        $templateProcessor->setValue('spesifikasi', $variables['spesifikasi'] ?? $firstItem['spesifikasi'] ?? '');
 
         $rincianBiayaVal = $variables['rincian_biaya'] ?? $variables['rincian_komponen_biaya'] ?? $variables['rincian'] ?? '';
         if (is_array($rincianBiayaVal)) {
@@ -195,21 +194,22 @@ class DocumentGeneratorService
         $templateProcessor->setValue('jumlah_harga', is_numeric($jHargaSec2) ? number_format((float)$jHargaSec2, 0, ',', '.') : ($jHargaSec2 ?? ''));
 
         // =========================================================================
-        // 3. FOTO & LAMPIRAN (EXTRACT DARI JSON $variables)
+        // 3. EMBED FOTO KE WORD
         // =========================================================================
         $rawPhotos   = $variables['foto'] ?? $variables['photos'] ?? $variables['lampiran_foto'] ?? [];
         $validPhotos = $this->filterValidPhotos($rawPhotos, $batasFoto);
 
-        $this->injectLampiranFotoBarang($templateProcessor, $validPhotos);
+        // FIX: Lempar juga $rincianBarang ke dalam fungsi foto biar namanya bisa ditarik
+        $this->injectLampiranFotoBarang($templateProcessor, $validPhotos, $rincianBarang);
         $this->injectTorBarangVariables($templateProcessor, $variables);
 
         // =========================================================================
-        // 4. SET VALUE UNTUK VARIABEL SISA LAINNYA
+        // 4. SET VALUE UNTUK VARIABEL SISA
         // =========================================================================
         $protectedKeys = [
             'no', 'nama_barang', 'barang', 'spesifikasi', 'qty', 'jumlah', 'satuan',
             'harga_satuan', 'total', 'jumlah_harga', 'barang_kiri', 'barang_kanan',
-            'foto_kiri', 'foto_kanan', 'rincian_barang', 'items', 'rincian', 'foto', 'photos', 'lampiran_foto'
+            'foto_kiri', 'foto_kanan', 'barang_1', 'barang_2', 'rincian_barang', 'items', 'rincian', 'foto', 'photos', 'lampiran_foto'
         ];
 
         foreach ($variables as $key => $value) {
@@ -221,9 +221,7 @@ class DocumentGeneratorService
             }
 
             if (is_array($value)) {
-                if (count($value) > 0 && is_array(reset($value))) {
-                    continue;
-                }
+                if (count($value) > 0 && is_array(reset($value))) continue;
                 $value = implode(', ', array_filter($value, 'is_scalar'));
             }
 
@@ -238,54 +236,37 @@ class DocumentGeneratorService
             $templateProcessor->setValue($key, (string)$value);
         }
 
+        // SIMPAN FILE WORD (FOTO SUDAH AMAN & KEKUNCI DI DALAM FILE .DOCX INI)
         $templateProcessor->saveAs($pathFile);
+
+        // =========================================================================
+        // HAPUS FOTO FISIK DI UPLOADS/ SETELAH TEREMBED KE WORD
+        // =========================================================================
+        foreach ($validPhotos as $photo) {
+            $fotoFisikPath = public_path($photo['path']);
+            if (file_exists($fotoFisikPath)) {
+                @unlink($fotoFisikPath);
+            }
+        }
 
         return 'documents/' . $namaFileFisik;
     }
 
-    /**
-     * Helper filter foto fisik dari JSON array $variables
-     */
-    private function filterValidPhotos($rawPhotos, int $batasFoto): array
-    {
-        if (!is_array($rawPhotos)) {
-            return [];
-        }
-
-        $validPhotos = [];
-        foreach ($rawPhotos as $p) {
-            $path = '';
-            $ket  = '';
-
-            if (is_array($p)) {
-                $path = $p['path'] ?? $p['path_foto'] ?? $p['url'] ?? '';
-                $ket  = $p['keterangan'] ?? $p['caption'] ?? $p['barang'] ?? '';
-            } elseif (is_string($p)) {
-                $path = $p;
-            }
-
-            if (!empty($path) && file_exists(public_path($path))) {
-                $validPhotos[] = [
-                    'path'       => $path,
-                    'keterangan' => $ket,
-                ];
-            }
-        }
-
-        if ($batasFoto > 0 && count($validPhotos) > $batasFoto) {
-            $validPhotos = array_slice($validPhotos, 0, $batasFoto);
-        }
-
-        return $validPhotos;
-    }
-
     public function generatePdf(DokumenCetak $antrean, int $copies = 1, string $pages = 'All', int $batasFoto = 0, int $kolomPerBaris = 4): string
     {
-        $docxRelativePath = $this->generate($antrean, $batasFoto, $kolomPerBaris);
-        $antrean->file_path = $docxRelativePath;
-        $antrean->save();
+        // 1. CEK FILE DOCX DULU. KALAU SUDAH ADA, PAKAI YANG ADA (TIDAK GENERATE RE-WORD!)
+        $docxRelativePath = $antrean->file_path;
+        $docxAbsPath      = $docxRelativePath ? public_path($docxRelativePath) : null;
 
-        $docxAbsPath = public_path($docxRelativePath);
+        if (!$docxAbsPath || !file_exists($docxAbsPath)) {
+            // Kalau file .docx belum pernah dibuat sama sekali, baru generate .docx 1x
+            $docxRelativePath  = $this->generate($antrean, $batasFoto, $kolomPerBaris);
+            $antrean->file_path = $docxRelativePath;
+            $antrean->save();
+            $docxAbsPath       = public_path($docxRelativePath);
+        }
+
+        // 2. KONVERSI FILE WORD YANG SUDAH JADI LANGSUNG KE PDF
         $pdfDirPath  = public_path('pdfs');
 
         if (!is_dir($pdfDirPath)) {
@@ -315,9 +296,12 @@ class DocumentGeneratorService
             $sofficePath = file_exists($linuxPath) ? $linuxPath : 'soffice';
         }
 
+        $envProfile = '-env:UserInstallation=' . sprintf('file:///%s/lo_profile', str_replace('\\', '/', sys_get_temp_dir()));
+        $flags      = "--headless --norestore --invisible --nodefault --nofirststartwizard {$envProfile}";
+
         $cmd = ($sofficePath === 'soffice')
-            ? "soffice --headless --convert-to pdf --outdir " . escapeshellarg($pdfDirPath) . " " . escapeshellarg($docxAbsPath)
-            : '"' . $sofficePath . '" --headless --convert-to pdf --outdir ' . escapeshellarg($pdfDirPath) . ' ' . escapeshellarg($docxAbsPath);
+            ? "soffice {$flags} --convert-to pdf --outdir " . escapeshellarg($pdfDirPath) . " " . escapeshellarg($docxAbsPath)
+            : '"' . $sofficePath . '" ' . $flags . ' --convert-to pdf --outdir ' . escapeshellarg($pdfDirPath) . ' ' . escapeshellarg($docxAbsPath);
 
         exec($cmd);
 
@@ -328,6 +312,40 @@ class DocumentGeneratorService
         return $pdfRelativePath;
     }
 
+    private function filterValidPhotos($rawPhotos, int $batasFoto): array
+    {
+        if (!is_array($rawPhotos)) {
+            return [];
+        }
+
+        $validPhotos = [];
+        foreach ($rawPhotos as $p) {
+            $path = '';
+            $ket  = '';
+
+            if (is_array($p)) {
+                $path = $p['path'] ?? $p['path_foto'] ?? $p['url'] ?? '';
+                $ket  = $p['keterangan'] ?? $p['caption'] ?? $p['barang'] ?? '';
+            } elseif (is_string($p)) {
+                $path = $p;
+            }
+
+            if (!empty($path) && file_exists(public_path($path))) {
+                // Langsung ambil path foto tanpa perlu diproses lewat GD / imagecreate
+                $validPhotos[] = [
+                    'path'       => $path,
+                    'keterangan' => $ket,
+                ];
+            }
+        }
+
+        if ($batasFoto > 0 && count($validPhotos) > $batasFoto) {
+            $validPhotos = array_slice($validPhotos, 0, $batasFoto);
+        }
+
+        return $validPhotos;
+    }
+
     private function injectTorBarangVariables(TemplateProcessor $templateProcessor, array $variables): void
     {
         $templateProcessor->setValue('nama_penyerah', $variables['nama_penyerah'] ?? $variables['penyerah'] ?? '');
@@ -336,10 +354,8 @@ class DocumentGeneratorService
         $templateProcessor->setValue('bidang2', $variables['bidang2'] ?? $variables['bidang_penerima'] ?? '');
     }
 
-    /**
-     * Disesuaikan dengan template baru (${foto_1} & ${foto_2}) + Duplikat Baris Otomatis
-     */
-    private function injectLampiranFotoBarang(TemplateProcessor $templateProcessor, array $validPhotos): void
+    // FIX: Tambahkan parameter array $rincianBarang
+    private function injectLampiranFotoBarang(TemplateProcessor $templateProcessor, array $validPhotos, array $rincianBarang): void
     {
         $photoCount = count($validPhotos);
 
@@ -348,14 +364,13 @@ class DocumentGeneratorService
             $rowsNeeded    = (int)ceil($photoCount / $kolomPerBaris);
 
             try {
-                // Duplikat baris berdasarkan placeholder foto_1
                 $templateProcessor->cloneRow('foto_1', $rowsNeeded);
 
                 for ($row = 1; $row <= $rowsNeeded; $row++) {
-                    $idxKiri  = ($row - 1) * $kolomPerBaris;     // Foto 1, 3, 5...
-                    $idxKanan = $idxKiri + 1;                   // Foto 2, 4, 6...
+                    $idxKiri  = ($row - 1) * $kolomPerBaris;
+                    $idxKanan = $idxKiri + 1;
 
-                    // Foto Kiri (${foto_1#1}, ${foto_1#2}, dst)
+                    // FOTO & NAMA BARANG KIRI (${foto_1} & ${barang_1})
                     if (isset($validPhotos[$idxKiri])) {
                         $pKiri = $validPhotos[$idxKiri];
                         $templateProcessor->setImageValue("foto_1#{$row}", [
@@ -364,11 +379,16 @@ class DocumentGeneratorService
                             'height' => 250,
                             'ratio'  => true
                         ]);
+
+                        // FIX: Ambil dari rincianBarang, kalau kosong baru ngambil keterangan gambar
+                        $namaBrgKiri = $rincianBarang[$idxKiri]['barang'] ?? $rincianBarang[$idxKiri]['nama_barang'] ?? $rincianBarang[$idxKiri]['nama_item'] ?? $pKiri['keterangan'] ?? '';
+                        $templateProcessor->setValue("barang_1#{$row}", $namaBrgKiri);
                     } else {
                         $templateProcessor->setValue("foto_1#{$row}", '');
+                        $templateProcessor->setValue("barang_1#{$row}", '');
                     }
 
-                    // Foto Kanan (${foto_2#1}, ${foto_2#2}, dst)
+                    // FOTO & NAMA BARANG KANAN (${foto_2} & ${barang_2})
                     if (isset($validPhotos[$idxKanan])) {
                         $pKanan = $validPhotos[$idxKanan];
                         $templateProcessor->setImageValue("foto_2#{$row}", [
@@ -377,12 +397,16 @@ class DocumentGeneratorService
                             'height' => 250,
                             'ratio'  => true
                         ]);
+
+                        // FIX: Sama halnya untuk bagian kanan
+                        $namaBrgKanan = $rincianBarang[$idxKanan]['barang'] ?? $rincianBarang[$idxKanan]['nama_barang'] ?? $rincianBarang[$idxKanan]['nama_item'] ?? $pKanan['keterangan'] ?? '';
+                        $templateProcessor->setValue("barang_2#{$row}", $namaBrgKanan);
                     } else {
                         $templateProcessor->setValue("foto_2#{$row}", '');
+                        $templateProcessor->setValue("barang_2#{$row}", '');
                     }
                 }
             } catch (Throwable $e) {
-                // Fallback jika cloneRow gagal/template tidak mendukung clone
                 for ($i = 1; $i <= 10; $i++) {
                     $idx = $i - 1;
                     if (isset($validPhotos[$idx])) {
@@ -393,21 +417,27 @@ class DocumentGeneratorService
                                 'height' => 250,
                                 'ratio'  => true
                             ]);
+                            $namaBrgFallback = $rincianBarang[$idx]['barang'] ?? $rincianBarang[$idx]['nama_barang'] ?? $rincianBarang[$idx]['nama_item'] ?? $validPhotos[$idx]['keterangan'] ?? '';
+                            $templateProcessor->setValue("barang_{$i}", $namaBrgFallback);
                         } catch (Throwable $ex) {
                             $templateProcessor->setValue("foto_{$i}", '');
+                            $templateProcessor->setValue("barang_{$i}", '');
                         }
                     } else {
                         $templateProcessor->setValue("foto_{$i}", '');
+                        $templateProcessor->setValue("barang_{$i}", '');
                     }
                 }
             }
         } else {
-            // Bersihkan semua tag jika tidak ada foto
             for ($i = 1; $i <= 10; $i++) {
                 $templateProcessor->setValue("foto_{$i}", '');
+                $templateProcessor->setValue("barang_{$i}", '');
             }
             $templateProcessor->setValue('foto_kiri', '');
             $templateProcessor->setValue('foto_kanan', '');
+            $templateProcessor->setValue('barang_kiri', '');
+            $templateProcessor->setValue('barang_kanan', '');
         }
     }
 }
