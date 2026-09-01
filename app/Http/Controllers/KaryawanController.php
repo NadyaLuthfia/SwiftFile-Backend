@@ -12,14 +12,15 @@ class KaryawanController extends Controller
 {
     public function index(Request $request)
     {
-        // 🔍 Membaca parameter ?status= dari React. Jika tidak dikirim, default-nya '1' (Aktif)
-        $status = $request->query('status', '1');
+        $query = Karyawan::with(['jabatan', 'bidang', 'user'])
+            ->orderBy('nama_lengkap', 'asc');
 
-        // Mengambil karyawan yang sesuai dengan status_aktif yang dicari
-        $karyawan = Karyawan::with(['jabatan', 'bidang', 'user'])
-            ->where('status_aktif', $status)
-            ->orderBy('nama_lengkap', 'asc')
-            ->get();
+        // Jika React tidak mengirim parameter ?status=, ambil SEMUA data (aktif & nonaktif dicampur)
+        if ($request->has('status') && $request->status !== null && $request->status !== '') {
+            $query->where('status_aktif', $request->status);
+        }
+
+        $karyawan = $query->get();
 
         return response()->json(['success' => true, 'data' => $karyawan]);
     }
@@ -185,6 +186,43 @@ class KaryawanController extends Controller
         } catch (\Exception $e) {
             DB::rollBack();
             return response()->json(['success' => false, 'message' => 'Gagal menonaktifkan data: ' . $e->getMessage()], 500);
+        }
+    }
+
+    public function forceDelete($id)
+    {
+        $karyawan = Karyawan::find($id);
+
+        if (!$karyawan) {
+            return response()->json(['success' => false, 'message' => 'Data karyawan tidak ditemukan'], 404);
+        }
+
+        DB::beginTransaction();
+        try {
+            // Hapus data user terkait terlebih dahulu jika karyawan memiliki akun
+            if ($karyawan->user) {
+                $karyawan->user->delete();
+            }
+
+            // Hapus data karyawan secara permanen dari database
+            if (method_exists($karyawan, 'forceDelete')) {
+                $karyawan->forceDelete();
+            } else {
+                $karyawan->delete();
+            }
+
+            DB::commit();
+            return response()->json([
+                'success' => true,
+                'message' => 'Data karyawan dan akun terkait berhasil dihapus secara permanen!'
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal menghapus data secara permanen: ' . $e->getMessage()
+            ], 500);
         }
     }
 }

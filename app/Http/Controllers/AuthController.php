@@ -25,7 +25,7 @@ class AuthController extends Controller
         // 3. Cek apakah user ada dan password-nya cocok
         if (!$user || !Hash::check($request->password, $user->password)) {
             return response()->json([
-                'message' => 'Aduh, username atau password lu salah nih. Coba cek lagi!'
+                'message' => 'Nama pengguna atau kata sandi tidak valid. Silakan periksa kembali'
             ], 401);
         }
 

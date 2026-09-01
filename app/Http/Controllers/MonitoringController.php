@@ -3,7 +3,8 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
-use App\Models\Dokumen; // 👈 PENTING: Ganti ke model Dokumen sayanggg!
+use App\Models\Dokumen;
+use Illuminate\Support\Facades\Storage;
 use Throwable;
 
 class MonitoringController extends Controller
@@ -20,19 +21,15 @@ class MonitoringController extends Controller
                 ], 403);
             }
 
-            // 💡 Load relasi 'user' sekaligus nested relasi 'karyawan' dari tabel Dokumen!
-            // Filter foto_ttd dihapus biar datanya keluar FULL semua.
             $query = Dokumen::with('user.karyawan')
                         ->latest()
                         ->take(30);
 
             $data = $query->get()->map(function($dokumen) {
-                // 🎯 Ambil nama_lengkap dari tabel karyawan. 
                 $dokumen->nama_pembuat = $dokumen->user->karyawan->nama_lengkap 
                                          ?? $dokumen->user->username 
                                          ?? 'Operator Admin';
 
-                // 💡 TAMBAHAN BARU: Kita buat alias 'nama_dokumen' biar frontend langsung baca!
                 $dokumen->nama_dokumen = $dokumen->nomor_dokumen;
 
                 return $dokumen;
@@ -48,9 +45,18 @@ class MonitoringController extends Controller
         }
     }
 
-    public function toggleStatus($id)
+    public function toggleStatus(Request $request, $id)
     {
         try {
+            // Tambahan Pengaman: Pastikan hak akses dicek juga dari dalam controller
+            $user = $request->user();
+            if (!$user || !in_array($user->role, ['master_admin', 'admin'])) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Oops! Kamu tidak memiliki hak akses untuk mengubah status.'
+                ], 403);
+            }
+
             $dokumen = Dokumen::find($id);
             if (!$dokumen) {
                 return response()->json([
@@ -59,10 +65,8 @@ class MonitoringController extends Controller
                 ], 404);
             }
 
-            // Cek status saat ini (jika null, anggap 1 sesuai default di database)
             $currentStatus = $dokumen->status_aktif ?? 1;
             
-            // Toggle logikanya: Kalau 1 ubah jadi 0, kalau 0 ubah jadi 1
             $dokumen->status_aktif = $currentStatus == 1 ? 0 : 1;
             $dokumen->save();
 
@@ -72,8 +76,55 @@ class MonitoringController extends Controller
                 'new_status' => $dokumen->status_aktif
             ], 200);
 
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    // 🌟 FUNGSI BARU UNTUK HAPUS DOKUMEN PERMANEN
+    public function destroy(Request $request, $id)
+    {
+        try {
+            // Tambahan Pengaman: Pastikan HANYA master_admin yang bisa menghapus permanen
+            $user = $request->user();
+            if (!$user || $user->role !== 'master_admin') {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Hanya Master Admin yang diizinkan menghapus dokumen!'
+                ], 403);
+            }
+
+            $dokumen = Dokumen::find($id);
+            if (!$dokumen) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Dokumen tidak ditemukan'
+                ], 404);
+            }
+
+            // Hapus file dokumen dari storage jika fisik file ada
+            if (!empty($dokumen->file_path) && Storage::disk('public')->exists($dokumen->file_path)) {
+                Storage::disk('public')->delete($dokumen->file_path);
+            }
+
+            // Hapus foto TTD jika ada
+            if (!empty($dokumen->foto_ttd) && $dokumen->foto_ttd !== 'tanpa_ttd' && Storage::disk('public')->exists($dokumen->foto_ttd)) {
+                Storage::disk('public')->delete($dokumen->foto_ttd);
+            }
+
+            // Hapus record di database
+            $dokumen->delete();
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Dokumen berhasil dihapus secara permanen.'
+            ], 200);
+
+        } catch (Throwable $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Gagal hapus dokumen: ' . $e->getMessage()
+            ], 500);
         }
     }
 }

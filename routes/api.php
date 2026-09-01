@@ -39,8 +39,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
         // 📄 ROUTE TEMPLATE (Akses Umum)
         Route::get('/templates', [TemplateController::class, 'index']);
-        Route::get('/templates/{id}', [TemplateController::class, 'show']); // 🎯 1. Ambil spesifik (bisa file lama)
-        Route::get('/templates/terbaru/{jenis_dokumen_id}', [TemplateController::class, 'getLatestByJenis']); // 🎯 2. Ambil otomatis terbaru berdasarkan jenisnya
+        Route::get('/templates/{id}', [TemplateController::class, 'show']); 
+        Route::get('/templates/terbaru/{jenis_dokumen_id}', [TemplateController::class, 'getLatestByJenis']); 
         Route::get('/templates/{id}/variables', [TemplateController::class, 'getVariables']);
 
         // Draft
@@ -68,7 +68,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/karyawan', [KaryawanController::class, 'index']);
         Route::get('/karyawan/{id}', [KaryawanController::class, 'show']);
 
-        // 🎯 ROUTE DOKUMEN (Get List Dokumen untuk Excel, Counter, dan Store)
+        // 🎯 ROUTE DOKUMEN
         Route::get('/dokumen', [DokumenController::class, 'index']);
         Route::get('/next-counter', [DokumenController::class, 'nextCounter']);
         Route::get('/dokumen/next-counter', [DokumenController::class, 'nextCounter']);
@@ -80,17 +80,26 @@ Route::middleware('auth:sanctum')->group(function () {
     // =========================================================================
     Route::middleware('role:master_admin,admin')->group(function () {
         Route::get('/monitoring-all', [MonitoringController::class, 'monitoringAll']);
+        Route::post('/monitoring/{id}/toggle-status', [MonitoringController::class, 'toggleStatus']);
+
+        // 🟢 ROUTE NONAKTIFKAN ARSIP DIPINDAH KE SINI AGAR ADMIN BIASA BISA AKSES:
+        Route::post('/arsip-history/{id}/toggle-aktif', [ArsipController::class, 'toggleAktif']);
 
         // Upload Template Baru
         Route::post('/templates', [TemplateController::class, 'upload']);
 
-        // Tambah & Edit Data Master
+        // Tambah, Edit & Nonaktifkan Data Master
         Route::post('/jabatan', [JabatanController::class, 'store']);
         Route::put('/jabatan/{id}', [JabatanController::class, 'update']);
+        Route::delete('/jabatan/{id}', [JabatanController::class, 'destroy']); // Nonaktifkan / Soft Delete
+
         Route::post('/bidang', [BidangController::class, 'store']);
         Route::put('/bidang/{id}', [BidangController::class, 'update']);
+        Route::delete('/bidang/{id}', [BidangController::class, 'destroy']); // Nonaktifkan / Soft Delete
+
         Route::post('/karyawan', [KaryawanController::class, 'store']);
         Route::put('/karyawan/{id}', [KaryawanController::class, 'update']);
+        Route::delete('/karyawan/{id}', [KaryawanController::class, 'destroy']); // Nonaktifkan / Soft Delete
 
         // Tambah & Edit Profil User Baru
         Route::post('/users', [UserController::class, 'store']);
@@ -103,21 +112,17 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::middleware('role:master_admin')->group(function () {
         Route::delete('/dokumen/{id}', [DokumenController::class, 'destroy']);
 
-        // Hapus Permanen Template & Data Master
+        // Hapus Permanen Template & Data Master (Khusus Master Admin)
         Route::delete('/templates/{id}', [TemplateController::class, 'destroy']);
-        Route::delete('/jabatan/{id}', [JabatanController::class, 'destroy']);
-        Route::delete('/bidang/{id}', [BidangController::class, 'destroy']);
-        Route::delete('/karyawan/{id}', [KaryawanController::class, 'destroy']);
+        Route::delete('/jabatan/{id}/permanent', [JabatanController::class, 'forceDelete']);
+        Route::delete('/bidang/{id}/permanent', [BidangController::class, 'forceDelete']);
+        Route::delete('/karyawan/{id}/permanent', [KaryawanController::class, 'forceDelete']);
 
         // Hapus & Nonaktifkan User
         Route::delete('/users/{id}', [UserController::class, 'destroy']);
         Route::post('/users/{id}/toggle-status', [UserController::class, 'toggleStatus']);
         
-        // Monitoring & Arsip
-        Route::post('/arsip-history/{id}/toggle-aktif', [ArsipController::class, 'toggleAktif']);
-        Route::post('/monitoring/{id}/toggle-status', [MonitoringController::class, 'toggleStatus']);
-        
-        // 🔴 INI ROUTE DELETE YANG BARU DITAMBAHKAN
+        // Hapus Monitoring
         Route::delete('/monitoring/{id}', [MonitoringController::class, 'destroy']);
     });
 

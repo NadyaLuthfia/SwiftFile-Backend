@@ -5,7 +5,7 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use App\Models\DokumenCetak;
 use App\Models\Template;
-use App\Services\DocumentGeneratorService; 
+use App\Services\DocumentGeneratorService;
 use App\Services\DocumentNumberService;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
@@ -24,6 +24,9 @@ class SiapCetakController extends Controller
         $this->numberService = $numberService;
     }
 
+    /**
+     * Menampilkan daftar dokumen antrean siap cetak milik user yang login
+     */
     public function index(Request $request)
     {
         try {
@@ -37,7 +40,7 @@ class SiapCetakController extends Controller
                 }
             }
 
-            $data = $query->get()->map(function($dokumen) {
+            $data = $query->get()->map(function ($dokumen) {
                 $template = Template::find($dokumen->template_id);
                 $namaTemplate = $template ? ($template->nama ?? $template->nama_template) : 'Dokumen';
 
@@ -48,14 +51,19 @@ class SiapCetakController extends Controller
                 $isTor = str_contains($lowerTemplate, 'tor') || str_contains($lowerDokumen, 'tor');
 
                 if ($isTor) {
-                    // Penamaan khusus TOR (diambil murni dari JSON variables)
-                    $namaBarang = $vars['nama_barang'] ?? $vars['barang'] ?? $vars['nama_item'] ?? '';
+                    $namaDetail = $vars['nama_pekerjaan'] 
+                        ?? $vars['pekerjaan'] 
+                        ?? $vars['nama_jasa'] 
+                        ?? $vars['jasa'] 
+                        ?? $vars['nama_barang'] 
+                        ?? $vars['barang'] 
+                        ?? $vars['nama_item'] 
+                        ?? '';
                     $namaPenyerah = $vars['nama_penyerah'] ?? $vars['penyerah'] ?? $vars['nama_pembuat'] ?? $vars['pembuat'] ?? '';
 
-                    $detailTor = trim("{$namaBarang} {$namaPenyerah}");
-                    $namaOtomatis = !empty($detailTor) ? "{$namaTemplate} - {$detailTor}" : $namaTemplate;
+                    $detailTor = trim("{$namaDetail} {$namaPenyerah}");
+                    $namaOtomatis = !empty($detailTor) ? "{$namaTemplate} - {$detailTor}" : ($dokumen->nama_dokumen ?? $namaTemplate);
                 } else {
-                    // Penamaan standar untuk BA & Surat Tugas (ST)
                     $rawNo = $vars['no'] ?? 1;
                     $noUrut = is_numeric($rawNo) ? sprintf("%03d", (int)$rawNo) : $rawNo;
 
@@ -84,7 +92,6 @@ class SiapCetakController extends Controller
 
     /**
      * KHUSUS TOMBOL "Selesai & Kirim Ke Antrean"
-     * Dipakai saat membuat dokumen baru MAUPUN menyelesaikan dari draft.
      */
     public function store(Request $request)
     {
@@ -106,14 +113,12 @@ class SiapCetakController extends Controller
         try {
             $variables = is_string($request->variables) ? json_decode($request->variables, true) : (array)$request->variables;
 
-            // 📷 1. AMBIL FOTO LAMA DARI DRAFT (JIKA ADA)
             $fotoLama = [];
             if ($request->has('foto_lama')) {
                 $rawFotoLama = $request->input('foto_lama');
                 $fotoLama = is_string($rawFotoLama) ? json_decode($rawFotoLama, true) : (array)$rawFotoLama;
             }
 
-            // 📷 2. OLAH FOTO BARU YANG DI-UPLOAD
             $uploadedPhotos = [];
             if ($request->hasFile('foto')) {
                 $dirPath = public_path('uploads/lampiran');
@@ -136,24 +141,44 @@ class SiapCetakController extends Controller
                 }
             }
 
-            // 🌟 3. GABUNGKAN FOTO LAMA + FOTO BARU KE VARIABLES
             $semuaFoto = array_merge((array)$fotoLama, $uploadedPhotos);
             if (!empty($semuaFoto)) {
                 $variables['foto'] = $semuaFoto;
             }
 
-            // Generate nomor dokumen & periode bulan/tahun
             $numData = $this->numberService->generate($request->template_id);
 
             $variables['no'] = $numData['no'];
             $variables['bulan'] = $numData['bulan_teks'];
             $variables['tahun'] = $numData['tahun'];
 
-            // Simpan ke Antrean Siap Cetak (DokumenCetak)
+            // 🛠️ PERBAIKAN UTAMA: Buat penamaan spesifik & unik sebelum disimpan ke Database
+            $template = Template::find($request->template_id);
+            $namaTemplate = $template ? ($template->nama ?? $template->nama_template) : 'Dokumen';
+            $lowerTemplate = strtolower($namaTemplate);
+
+            if (str_contains($lowerTemplate, 'tor')) {
+                $namaDetail = $variables['nama_pekerjaan'] 
+                    ?? $variables['pekerjaan'] 
+                    ?? $variables['nama_jasa'] 
+                    ?? $variables['jasa'] 
+                    ?? $variables['nama_barang'] 
+                    ?? $variables['barang'] 
+                    ?? $variables['nama_item'] 
+                    ?? '';
+                $namaPenyerah = $variables['nama_penyerah'] ?? $variables['penyerah'] ?? $variables['nama_pembuat'] ?? $variables['pembuat'] ?? '';
+
+                $detailTor = trim("{$namaDetail} {$namaPenyerah}");
+                $namaDokumenFinal = !empty($detailTor) ? "{$namaTemplate} - {$detailTor}" : "{$namaTemplate} - " . uniqid();
+            } else {
+                $namaDokumenFinal = $numData['nama_dokumen_final'] ?? $namaTemplate;
+            }
+
+            // Simpan ke Antrean Siap Cetak dengan nama unik
             $siapCetak = DokumenCetak::create([
                 'user_id'      => $request->user()->id,
                 'template_id'  => $request->template_id,
-                'nama_dokumen' => $numData['nama_dokumen_final'],
+                'nama_dokumen' => $namaDokumenFinal,
                 'variables'    => $variables, 
             ]);
 
@@ -162,7 +187,6 @@ class SiapCetakController extends Controller
             $siapCetak->file_path = $filePathFisik;
             $siapCetak->save();
 
-            // Jika penyelesaian ini berasal dari draft, hapus draft lamanya dari tabel 'drafts'
             $draftId = $request->input('draft_id') ?? ($variables['draft_id'] ?? null);
             if ($draftId) {
                 DB::table('drafts')->where('id', $draftId)->delete();
@@ -180,51 +204,54 @@ class SiapCetakController extends Controller
 
         } catch (Throwable $e) {
             DB::rollBack();
-            return response()->json(['status' => 'error', 'message' => 'Gagal menyimpan dokumen ke antrean.', 'error' => $e->getMessage()], 500);
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Gagal menyimpan dokumen ke antrean.',
+                'error' => $e->getMessage()
+            ], 500);
         }
     }
 
+    /**
+     * Memperbarui tanggal cetak dan melakukan kompilasi PDF
+     */
     public function updateStatus(Request $request, $id)
     {
         try {
             $dokumen = DokumenCetak::findOrFail($id);
             
-            // Catat tanggal cetak jika belum ada
             if (empty($dokumen->tanggal_cetak)) {
                 $dokumen->tanggal_cetak = now();
                 $dokumen->save();
             }
 
-            $pdfRelativePath = str_replace(['documents/', '.docx'], ['pdfs/', '.pdf'], $dokumen->file_path);
-
-            if (empty($pdfRelativePath) || !file_exists(public_path($pdfRelativePath))) {
-                $pdfRelativePath = $this->documentService->generatePdf($dokumen);
-            }
+            $pdfRelativePath = $this->documentService->generatePdf($dokumen);
 
             return response()->json([
                 'status' => 'success', 
                 'message' => 'PDF siap dicetak!',
-                'pdf_url' => asset($pdfRelativePath),
+                'pdf_url' => asset($pdfRelativePath) . '?t=' . time(),
                 'tanggal_cetak' => $dokumen->tanggal_cetak
             ], 200);
             
         } catch (Throwable $e) {
-            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
+            return response()->json([
+                'status' => 'error',
+                'message' => $e->getMessage()
+            ], 500);
         }
     }
 
+    /**
+     * Mengunduh/menampilkan langsung file PDF dokumen
+     */
     public function cetak($id)
     {
         try {
             $dokumen = DokumenCetak::findOrFail($id);
 
-            $pdfRelativePath = str_replace(['documents/', '.docx'], ['pdfs/', '.pdf'], $dokumen->file_path);
+            $pdfRelativePath = $this->documentService->generatePdf($dokumen);
             $filePathFisik = public_path($pdfRelativePath);
-
-            if (!file_exists($filePathFisik)) {
-                $pdfRelativePath = $this->documentService->generatePdf($dokumen);
-                $filePathFisik = public_path($pdfRelativePath);
-            }
 
             return response()->file($filePathFisik, [
                 'Content-Type' => 'application/pdf',
@@ -232,9 +259,15 @@ class SiapCetakController extends Controller
             ]);
 
         } catch (ModelNotFoundException $e) {
-            return response()->json(['status' => 'error', 'message' => 'Dokumen tidak ditemukan.'], 404);
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Dokumen tidak ditemukan.'
+            ], 404);
         } catch (Throwable $e) {
-            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
+            return response()->json([
+                'status' => 'error',
+                'message' => $e->getMessage()
+            ], 500);
         }
     }
 }
