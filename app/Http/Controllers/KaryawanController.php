@@ -3,10 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Models\Karyawan;
-use App\Models\User; 
+use App\Models\User;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Hash; 
-use Illuminate\Support\Facades\DB;   
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 
 class KaryawanController extends Controller
 {
@@ -15,19 +15,22 @@ class KaryawanController extends Controller
         $query = Karyawan::with(['jabatan', 'bidang', 'user'])
             ->orderBy('nama_lengkap', 'asc');
 
-        // Jika React tidak mengirim parameter ?status=, ambil SEMUA data (aktif & nonaktif dicampur)
-        if ($request->has('status') && $request->status !== null && $request->status !== '') {
+        // Filter berdasarkan status_aktif jika parameter status dikirim
+        if ($request->filled('status')) {
             $query->where('status_aktif', $request->status);
         }
 
         $karyawan = $query->get();
 
-        return response()->json(['success' => true, 'data' => $karyawan]);
+        return response()->json([
+            'success' => true,
+            'data'    => $karyawan,
+        ]);
     }
 
     public function store(Request $request)
     {
-        // 🛡️ Validasi data karyawan DAN data akun user
+        // Validasi data karyawan dan akun user
         $request->validate([
             'nama_lengkap' => 'required|string|max:255',
             'jabatan_id'   => 'required|exists:jabatan,id',
@@ -35,18 +38,17 @@ class KaryawanController extends Controller
             'alamat'       => 'nullable|string',
             'no_hp'        => 'nullable|string|max:20',
             'email'        => 'nullable|email|max:255',
-            
-            // Validasi akun jika checkbox 'buat_akun' bernilai true
+
+            // Validasi akun jika 'buat_akun' bernilai true
             'username'     => 'required_if:buat_akun,true|nullable|string|max:255|unique:users,username',
             'password'     => 'required_if:buat_akun,true|nullable|string|min:6',
             'role'         => 'required_if:buat_akun,true|nullable|string|in:user,admin,master_admin',
         ]);
 
-        // 🔒 Transaksi database dimulai
         DB::beginTransaction();
 
         try {
-            // STEP 1: Buat data Karyawan terlebih dahulu (karena kita butuh ID-nya)
+            // Step 1: Simpan data Karyawan
             $karyawan = Karyawan::create([
                 'nama_lengkap' => $request->nama_lengkap,
                 'jabatan_id'   => $request->jabatan_id,
@@ -54,46 +56,52 @@ class KaryawanController extends Controller
                 'alamat'       => $request->alamat,
                 'no_hp'        => $request->no_hp,
                 'email'        => $request->email,
-                'status_aktif' => $request->get('status_aktif', 1), 
+                'status_aktif' => $request->get('status_aktif', 1),
             ]);
 
-            // STEP 2: Jika admin mencentang checkbox "Buatkan Akses Login"
-            if ($request->buat_akun == true || $request->buat_akun == 'true') {
+            // Step 2: Buat akun login jika dicentang
+            if ($request->boolean('buat_akun')) {
                 User::create([
-                    'karyawan_id'  => $karyawan->id, // Ikat ID karyawan baru ke sini
-                    'username'     => $request->username,
-                    'password'     => Hash::make($request->password), 
-                    'role'         => $request->role,
+                    'karyawan_id' => $karyawan->id,
+                    'username'    => $request->username,
+                    'password'    => Hash::make($request->password),
+                    'role'        => $request->role,
                 ]);
             }
 
-            // Sahkan penyimpanan data ke MySQL
-            DB::commit(); 
-            
-            // Load kembali semua relasi agar React menerima data utuh terbaru
+            DB::commit();
+
+            // Load ulang relasi agar respon utuh
             $karyawan->load(['jabatan', 'bidang', 'user']);
 
-            return response()->json(['success' => true, 'data' => $karyawan], 201);
+            return response()->json([
+                'success' => true,
+                'data'    => $karyawan,
+            ], 201);
 
         } catch (\Exception $e) {
             DB::rollBack();
-            return response()->json(['success' => false, 'message' => 'Gagal menyimpan data: ' . $e->getMessage()], 500);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal menyimpan data: ' . $e->getMessage(),
+            ], 500);
         }
     }
 
     public function update(Request $request, $id)
     {
-        // Cari data karyawan beserta data akun user lamanya (jika ada)
         $karyawan = Karyawan::with('user')->find($id);
 
         if (!$karyawan) {
-            return response()->json(['success' => false, 'message' => 'Data karyawan tidak ditemukan'], 404);
+            return response()->json([
+                'success' => false,
+                'message' => 'Data karyawan tidak ditemukan',
+            ], 404);
         }
 
-        // Ambil ID user lama (jika ada) untuk pengecualian validasi unique username
         $userIdLama = $karyawan->user ? $karyawan->user->id : 'NULL';
 
-        // 🛡️ Validasi data edit (status_aktif dibuat nullable agar fleksibel)
         $request->validate([
             'nama_lengkap' => 'required|string|max:255',
             'jabatan_id'   => 'required|exists:jabatan,id',
@@ -102,16 +110,16 @@ class KaryawanController extends Controller
             'no_hp'        => 'nullable|string|max:20',
             'email'        => 'nullable|email|max:255',
             'status_aktif' => 'nullable|in:0,1',
-            
-            'username'     => 'required_if:buat_akun,true|nullable|string|max:255|unique:users,username,'.$userIdLama,
-            'password'     => 'nullable|string|min:6', 
+
+            'username'     => 'required_if:buat_akun,true|nullable|string|max:255|unique:users,username,' . $userIdLama,
+            'password'     => 'nullable|string|min:6',
             'role'         => 'required_if:buat_akun,true|nullable|string|in:user,admin,master_admin',
         ]);
 
         DB::beginTransaction();
 
         try {
-            // STEP 1: Update data fisik karyawan
+            // Step 1: Update data karyawan
             $karyawan->update([
                 'nama_lengkap' => $request->nama_lengkap,
                 'jabatan_id'   => $request->jabatan_id,
@@ -119,14 +127,12 @@ class KaryawanController extends Controller
                 'alamat'       => $request->alamat,
                 'no_hp'        => $request->no_hp,
                 'email'        => $request->email,
-                // Jika status_aktif absen dari React, pakai nilai lama di database
                 'status_aktif' => $request->get('status_aktif', $karyawan->status_aktif),
             ]);
 
-            // STEP 2: Kelola data akun loginnya
-            if ($request->buat_akun == true || $request->buat_akun == 'true') {
+            // Step 2: Kelola data akun login
+            if ($request->boolean('buat_akun')) {
                 if (!$karyawan->user) {
-                    // Opsi A: Dulu GAK PUNYA AKUN, sekarang baru mau DIBUATKAN
                     User::create([
                         'karyawan_id' => $karyawan->id,
                         'username'    => $request->username,
@@ -134,13 +140,11 @@ class KaryawanController extends Controller
                         'role'        => $request->role,
                     ]);
                 } else {
-                    // Opsi B: Memang SUDAH PUNYA AKUN, tinggal kita UPDATE data akunnya
                     $dataUserUpdate = [
                         'username' => $request->username,
                         'role'     => $request->role,
                     ];
 
-                    // Hanya ganti password jika kolom password diisi oleh admin
                     if ($request->filled('password')) {
                         $dataUserUpdate['password'] = Hash::make($request->password);
                     }
@@ -151,14 +155,21 @@ class KaryawanController extends Controller
 
             DB::commit();
 
-            // Load ulang relasi sebelum dilempar balik ke React
             $karyawan->load(['jabatan', 'bidang', 'user']);
 
-            return response()->json(['success' => true, 'message' => 'Data karyawan dan akun berhasil diperbarui', 'data' => $karyawan]);
+            return response()->json([
+                'success' => true,
+                'message' => 'Data karyawan dan akun berhasil diperbarui',
+                'data'    => $karyawan,
+            ]);
 
         } catch (\Exception $e) {
             DB::rollBack();
-            return response()->json(['success' => false, 'message' => 'Gagal mengubah data: ' . $e->getMessage()], 500);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal mengubah data: ' . $e->getMessage(),
+            ], 500);
         }
     }
 
@@ -167,25 +178,34 @@ class KaryawanController extends Controller
         $karyawan = Karyawan::find($id);
 
         if (!$karyawan) {
-            return response()->json(['success' => false, 'message' => 'Data karyawan tidak ditemukan'], 404);
+            return response()->json([
+                'success' => false,
+                'message' => 'Data karyawan tidak ditemukan',
+            ], 404);
         }
 
         DB::beginTransaction();
+
         try {
-            // 🛠️ AMAN: Hanya diubah status_aktif-nya jadi 0 (nonaktif), tidak membumihanguskan data
+            // Nonaktifkan karyawan (status_aktif = 0)
             $karyawan->update([
-                'status_aktif' => 0
+                'status_aktif' => 0,
             ]);
 
             DB::commit();
+
             return response()->json([
-                'success' => true, 
-                'message' => 'Karyawan berhasil dinonaktifkan, data tetap aman di database!'
+                'success' => true,
+                'message' => 'Karyawan berhasil dinonaktifkan, data tetap aman di database!',
             ]);
-            
+
         } catch (\Exception $e) {
             DB::rollBack();
-            return response()->json(['success' => false, 'message' => 'Gagal menonaktifkan data: ' . $e->getMessage()], 500);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal menonaktifkan data: ' . $e->getMessage(),
+            ], 500);
         }
     }
 
@@ -194,17 +214,21 @@ class KaryawanController extends Controller
         $karyawan = Karyawan::find($id);
 
         if (!$karyawan) {
-            return response()->json(['success' => false, 'message' => 'Data karyawan tidak ditemukan'], 404);
+            return response()->json([
+                'success' => false,
+                'message' => 'Data karyawan tidak ditemukan',
+            ], 404);
         }
 
         DB::beginTransaction();
+
         try {
-            // Hapus data user terkait terlebih dahulu jika karyawan memiliki akun
+            // Hapus user terkait jika ada
             if ($karyawan->user) {
                 $karyawan->user->delete();
             }
 
-            // Hapus data karyawan secara permanen dari database
+            // Hapus permanen karyawan
             if (method_exists($karyawan, 'forceDelete')) {
                 $karyawan->forceDelete();
             } else {
@@ -212,16 +236,18 @@ class KaryawanController extends Controller
             }
 
             DB::commit();
+
             return response()->json([
                 'success' => true,
-                'message' => 'Data karyawan dan akun terkait berhasil dihapus secara permanen!'
+                'message' => 'Data karyawan dan akun terkait berhasil dihapus secara permanen!',
             ]);
 
         } catch (\Exception $e) {
             DB::rollBack();
+
             return response()->json([
                 'success' => false,
-                'message' => 'Gagal menghapus data secara permanen: ' . $e->getMessage()
+                'message' => 'Gagal menghapus data secara permanen: ' . $e->getMessage(),
             ], 500);
         }
     }
