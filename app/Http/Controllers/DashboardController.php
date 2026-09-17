@@ -25,12 +25,22 @@ class DashboardController extends Controller
             
             // 🔒 Total Arsip Sah (Private untuk user) & Total Dokumen Setahun
             $totalArsip = 0;
+            $userTotalArsip = 0;
             $totalDokumenTahunIni = 0;
 
             if ($hasDokumenTable && $authUser) {
-                $totalArsip = DB::table('dokumen')
+                // Hitung total arsip khusus milik user yang sedang login
+                $userTotalArsip = DB::table('dokumen')
                     ->where('user_id', $authUser->id)
                     ->count();
+
+                // Jika user biasa, totalArsip mengambil arsip personalnya.
+                // Jika Admin/Master Admin, totalArsip mengambil seluruh total dokumen di sistem.
+                if ($isUserRole) {
+                    $totalArsip = $userTotalArsip;
+                } else {
+                    $totalArsip = DB::table('dokumen')->count();
+                }
 
                 // 📊 Hitung total dokumen yang dibuat selama 1 tahun berjalan
                 $totalDokumenTahunIni = DB::table('dokumen')
@@ -59,13 +69,14 @@ class DashboardController extends Controller
                     'stats'   => [
                         'total_templates'     => $totalTemplates, 
                         'total_arsip'         => $totalArsip,
+                        'user_total_arsip'    => $userTotalArsip,
                         'total_dokumen_tahun' => 0
                     ],
                     'rekap'   => $rekap
                 ], 200);
             }
 
-            // Tarik seluruh dokumen terkait
+            // Tarik seluruh dokumen terkait (Jika user biasa, filter berdasarkan user_id)
             $dokumenQuery = DB::table('dokumen');
             if ($isUserRole && $authUser) {
                 $dokumenQuery->where('user_id', $authUser->id);
@@ -156,6 +167,7 @@ class DashboardController extends Controller
                 'stats' => [ 
                     'total_templates'     => $totalTemplates,
                     'total_arsip'         => $totalArsip,
+                    'user_total_arsip'    => $userTotalArsip,
                     'total_dokumen_tahun' => $totalDokumenTahunIni,
                 ],
                 'rekap' => $rekap
@@ -167,5 +179,13 @@ class DashboardController extends Controller
                 'message' => 'Gagal memuat statistik dashboard: ' . $e->getMessage()
             ], 500);
         }
+    }
+
+    /**
+     * 🌟 Endpoint Cadangan Khusus Ringkasan Personal User
+     */
+    public function myTemplateSummary(Request $request)
+    {
+        return $this->dashboardStats($request);
     }
 }
