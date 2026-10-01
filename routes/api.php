@@ -85,8 +85,10 @@ Route::middleware('auth:sanctum')->group(function () {
         // 🟢 ROUTE NONAKTIFKAN ARSIP DIPINDAH KE SINI AGAR ADMIN BIASA BISA AKSES:
         Route::post('/arsip-history/{id}/toggle-aktif', [ArsipController::class, 'toggleAktif']);
 
-        // Upload Template Baru
+        // Upload & Kelola Status Template
         Route::post('/templates', [TemplateController::class, 'upload']);
+        Route::put('/templates/{id}', [TemplateController::class, 'update']);
+        Route::post('/templates/{id}/toggle-status', [TemplateController::class, 'toggleStatus']);
 
         // Tambah, Edit & Nonaktifkan Data Master
         Route::post('/jabatan', [JabatanController::class, 'store']);

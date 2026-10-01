@@ -24,6 +24,7 @@ class ArsipController extends Controller
 
     /**
      * 1. Menampilkan Daftar Dokumen Arsip
+     * 🔒 Halaman Arsip: Hanya menampilkan dokumen yang dibuat oleh user yang sedang login
      */
     public function index(Request $request)
     {
@@ -33,14 +34,8 @@ class ArsipController extends Controller
             $query = DB::table('dokumen')->latest();
 
             if ($user) {
-                $query->where(function($q) use ($user) {
-                    $q->where('user_id', $user->id);
-                    
-                    $identity = $user->name ?? $user->username ?? $user->nama ?? null;
-                    if (!empty($identity)) {
-                        $q->orWhereRaw("LOWER(CAST(kolom_tambahan AS CHAR)) LIKE ?", ['%' . strtolower($identity) . '%']);
-                    }
-                });
+                // Kunci filter: Hanya dokumen yang dibuat oleh user ini
+                $query->where('user_id', $user->id);
             }
 
             $dokumenList = $query->get();

@@ -9,5 +9,11 @@ class Template extends Model
 {
     use HasFactory;
 
-    protected $fillable = ['nama', 'file_path', 'ukuran', 'jenis_dokumen_id']; 
+    protected $fillable = [
+        'nama',
+        'file_path',
+        'ukuran',
+        'jenis_dokumen_id',
+        'status_aktif', // 👈 Pastikan baris ini ditambahkan
+    ];
 }

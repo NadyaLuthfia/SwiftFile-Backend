@@ -34,15 +34,11 @@ class DashboardController extends Controller
                     ->where('user_id', $authUser->id)
                     ->count();
 
-                // Jika user biasa, totalArsip mengambil arsip personalnya.
-                // Jika Admin/Master Admin, totalArsip mengambil seluruh total dokumen di sistem.
-                if ($isUserRole) {
-                    $totalArsip = $userTotalArsip;
-                } else {
-                    $totalArsip = DB::table('dokumen')->count();
-                }
+                // 🔒 Diselaraskan dengan ArsipController:
+                // Angka Arsip & History dihitung khusus berdasarkan dokumen milik user ini
+                $totalArsip = $userTotalArsip;
 
-                // 📊 Hitung total dokumen yang dibuat selama 1 tahun berjalan
+                // 📊 Hitung total dokumen yang dibuat selama 1 tahun berjalan (seluruh sistem)
                 $totalDokumenTahunIni = DB::table('dokumen')
                     ->whereYear('created_at', Carbon::now()->year)
                     ->count();
