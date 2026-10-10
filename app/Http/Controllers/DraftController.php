@@ -406,7 +406,8 @@ class DraftController extends Controller
                 if (isset($isianData['foto']) && is_array($isianData['foto'])) {
                     foreach ($isianData['foto'] as $fotoItem) {
                         if (isset($fotoItem['path']) && file_exists(public_path($fotoItem['path']))) {
-                            @unlink(public_path($fotoItem['path']));
+                            // MATIKAN KODE INI BIAR FOTO NETEP DI FOLDER
+                            // @unlink(public_path($fotoItem['path'])); 
                         }
                     }
                 }
@@ -414,7 +415,8 @@ class DraftController extends Controller
                 // Fallback untuk file lama yang masih ada di storage/app/public/draft_images
                 foreach ($isianData as $value) {
                     if (is_string($value) && str_contains($value, 'draft_images/') && Storage::disk('public')->exists($value)) {
-                        Storage::disk('public')->delete($value);
+                        // MATIKAN JUGA STORAGE DELETE INI
+                        // Storage::disk('public')->delete($value);
                     }
                 }
             }

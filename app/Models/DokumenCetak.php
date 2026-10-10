@@ -18,6 +18,7 @@ class DokumenCetak extends Model
         'template_id',
         'nama_dokumen',
         'variables',     // Sesuaikan dengan nama kolom di database kamu (variables / data_input)
+        'history_perubahan',
         'file_path',
         'status_aktif'
     ];
@@ -29,5 +30,11 @@ class DokumenCetak extends Model
     public function user()
     {
         return $this->belongsTo(User::class, 'user_id');
+    }
+
+    public function template()
+    {
+        // Relasi ini ngasih tau kalau dokumen cetak ini milik sebuah template
+        return $this->belongsTo(Template::class, 'template_id');
     }
 }

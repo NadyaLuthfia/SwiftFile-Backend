@@ -36,6 +36,7 @@ Route::middleware('auth:sanctum')->group(function () {
         // Dashboard & Arsip
         Route::get('/dashboard/stats', [DashboardController::class, 'dashboardStats']);
         Route::get('/arsip-history', [ArsipController::class, 'index']);
+        Route::get('/arsip-history/{id}/preview', [ArsipController::class, 'preview']);
 
         // 📄 ROUTE TEMPLATE (Akses Umum)
         Route::get('/templates', [TemplateController::class, 'index']);
@@ -54,7 +55,10 @@ Route::middleware('auth:sanctum')->group(function () {
         // Siap Cetak
         Route::get('/siap-cetak', [SiapCetakController::class, 'index']);
         Route::post('/generate-docx', [TemplateController::class, 'generateDocx']);
+        Route::get('/siap-cetak/{id}', [SiapCetakController::class, 'show']);
         Route::post('/siap-cetak', [SiapCetakController::class, 'store']);
+        Route::put('/siap-cetak/{id}', [SiapCetakController::class, 'update']);
+        Route::post('/siap-cetak/{id}/update', [SiapCetakController::class, 'update']);
         Route::put('/siap-cetak/{id}/status', [SiapCetakController::class, 'updateStatus']);
         Route::get('/siap-cetak/{id}/download', [SiapCetakController::class, 'download']);
         Route::post('/siap-cetak/{id}/selesai', [ArsipController::class, 'selesaiSuratTugas']);
@@ -83,10 +87,19 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/monitoring/{id}/toggle-status', [MonitoringController::class, 'toggleStatus']);
 
         // 🟢 ROUTE NONAKTIFKAN ARSIP DIPINDAH KE SINI AGAR ADMIN BIASA BISA AKSES:
+        Route::get('/arsip-dokumen', [ArsipController::class, 'arsipDokumen']);
+        Route::get('/arsip-dokumen', [App\Http\Controllers\ArsipController::class, 'arsipDokumen']);
         Route::post('/arsip-history/{id}/toggle-aktif', [ArsipController::class, 'toggleAktif']);
+        
+        // ✨ TAMBAHIN INI BIAR SAMA PERSIS KAYAK SIAP CETAK
+        Route::get('/arsip/{id}', [ArsipController::class, 'show']);
+        Route::put('/arsip/{id}', [ArsipController::class, 'update']);
+        Route::post('/arsip/{id}/update', [ArsipController::class, 'update']);
 
-        // Upload Template Baru
+        // Upload & Kelola Status Template
         Route::post('/templates', [TemplateController::class, 'upload']);
+        Route::put('/templates/{id}', [TemplateController::class, 'update']);
+        Route::post('/templates/{id}/toggle-status', [TemplateController::class, 'toggleStatus']);
 
         // Tambah, Edit & Nonaktifkan Data Master
         Route::post('/jabatan', [JabatanController::class, 'store']);

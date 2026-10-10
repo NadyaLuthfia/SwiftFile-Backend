@@ -32,17 +32,20 @@ class KaryawanController extends Controller
     {
         // Validasi data karyawan dan akun user
         $request->validate([
-            'nama_lengkap' => 'required|string|max:255',
-            'jabatan_id'   => 'required|exists:jabatan,id',
-            'bidang_id'    => 'required|exists:bidang,id',
-            'alamat'       => 'nullable|string',
-            'no_hp'        => 'nullable|string|max:20',
-            'email'        => 'nullable|email|max:255',
+            'nama_lengkap'    => 'required|string|max:255',
+            'npp'             => 'nullable|string|max:50',
+            'jabatan_id'      => 'required|exists:jabatan,id',
+            'tingkat_jabatan' => 'nullable|string|max:100',
+            'tingkat_pangkat' => 'nullable|string|max:100',
+            'bidang_id'       => 'required|exists:bidang,id',
+            'alamat'          => 'nullable|string',
+            'no_hp'           => 'nullable|string|max:20',
+            'email'           => 'nullable|email|max:255',
 
             // Validasi akun jika 'buat_akun' bernilai true
-            'username'     => 'required_if:buat_akun,true|nullable|string|max:255|unique:users,username',
-            'password'     => 'required_if:buat_akun,true|nullable|string|min:6',
-            'role'         => 'required_if:buat_akun,true|nullable|string|in:user,admin,master_admin',
+            'username'        => 'required_if:buat_akun,true|nullable|string|max:255|unique:users,username',
+            'password'        => 'required_if:buat_akun,true|nullable|string|min:6',
+            'role'            => 'required_if:buat_akun,true|nullable|string|in:user,admin,master_admin',
         ]);
 
         DB::beginTransaction();
@@ -50,13 +53,16 @@ class KaryawanController extends Controller
         try {
             // Step 1: Simpan data Karyawan
             $karyawan = Karyawan::create([
-                'nama_lengkap' => $request->nama_lengkap,
-                'jabatan_id'   => $request->jabatan_id,
-                'bidang_id'    => $request->bidang_id,
-                'alamat'       => $request->alamat,
-                'no_hp'        => $request->no_hp,
-                'email'        => $request->email,
-                'status_aktif' => $request->get('status_aktif', 1),
+                'nama_lengkap'    => $request->nama_lengkap,
+                'npp'             => $request->npp,
+                'jabatan_id'      => $request->jabatan_id,
+                'tingkat_jabatan' => $request->tingkat_jabatan,
+                'tingkat_pangkat' => $request->tingkat_pangkat,
+                'bidang_id'       => $request->bidang_id,
+                'alamat'          => $request->alamat,
+                'no_hp'           => $request->no_hp,
+                'email'           => $request->email,
+                'status_aktif'    => $request->get('status_aktif', 1),
             ]);
 
             // Step 2: Buat akun login jika dicentang
@@ -103,17 +109,20 @@ class KaryawanController extends Controller
         $userIdLama = $karyawan->user ? $karyawan->user->id : 'NULL';
 
         $request->validate([
-            'nama_lengkap' => 'required|string|max:255',
-            'jabatan_id'   => 'required|exists:jabatan,id',
-            'bidang_id'    => 'required|exists:bidang,id',
-            'alamat'       => 'nullable|string',
-            'no_hp'        => 'nullable|string|max:20',
-            'email'        => 'nullable|email|max:255',
-            'status_aktif' => 'nullable|in:0,1',
+            'nama_lengkap'    => 'required|string|max:255',
+            'npp'             => 'nullable|string|max:50',
+            'jabatan_id'      => 'required|exists:jabatan,id',
+            'tingkat_jabatan' => 'nullable|string|max:100',
+            'tingkat_pangkat' => 'nullable|string|max:100',
+            'bidang_id'       => 'required|exists:bidang,id',
+            'alamat'          => 'nullable|string',
+            'no_hp'           => 'nullable|string|max:20',
+            'email'           => 'nullable|email|max:255',
+            'status_aktif'    => 'nullable|in:0,1',
 
-            'username'     => 'required_if:buat_akun,true|nullable|string|max:255|unique:users,username,' . $userIdLama,
-            'password'     => 'nullable|string|min:6',
-            'role'         => 'required_if:buat_akun,true|nullable|string|in:user,admin,master_admin',
+            'username'        => 'required_if:buat_akun,true|nullable|string|max:255|unique:users,username,' . $userIdLama,
+            'password'        => 'nullable|string|min:6',
+            'role'            => 'required_if:buat_akun,true|nullable|string|in:user,admin,master_admin',
         ]);
 
         DB::beginTransaction();
@@ -121,13 +130,16 @@ class KaryawanController extends Controller
         try {
             // Step 1: Update data karyawan
             $karyawan->update([
-                'nama_lengkap' => $request->nama_lengkap,
-                'jabatan_id'   => $request->jabatan_id,
-                'bidang_id'    => $request->bidang_id,
-                'alamat'       => $request->alamat,
-                'no_hp'        => $request->no_hp,
-                'email'        => $request->email,
-                'status_aktif' => $request->get('status_aktif', $karyawan->status_aktif),
+                'nama_lengkap'    => $request->nama_lengkap,
+                'npp'             => $request->npp,
+                'jabatan_id'      => $request->jabatan_id,
+                'tingkat_jabatan' => $request->tingkat_jabatan,
+                'tingkat_pangkat' => $request->tingkat_pangkat,
+                'bidang_id'       => $request->bidang_id,
+                'alamat'          => $request->alamat,
+                'no_hp'           => $request->no_hp,
+                'email'           => $request->email,
+                'status_aktif'    => $request->get('status_aktif', $karyawan->status_aktif),
             ]);
 
             // Step 2: Kelola data akun login

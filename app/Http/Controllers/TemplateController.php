@@ -42,6 +42,7 @@ class TemplateController extends Controller
                 'file_path' => $directPath, 
                 'ukuran' => $ukuran, 
                 'jenis_dokumen_id' => $request->input('jenis_dokumen_id'), 
+                'status_aktif' => 1, // Default aktif saat pertama kali diunggah
             ]);
 
             return response()->json([
@@ -69,6 +70,65 @@ class TemplateController extends Controller
         return response()->json([
             'success' => true,
             'data' => $templates
+        ], 200);
+    }
+
+    /**
+     * 🔄 Fungsi mengubah status aktif/nonaktif template (PUT /api/templates/{id})
+     */
+    public function update(Request $request, $id)
+    {
+        $template = Template::find($id);
+
+        if (!$template) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Data template tidak ditemukan.'
+            ], 404);
+        }
+
+        if ($request->has('status_aktif')) {
+            $template->status_aktif = $request->input('status_aktif');
+        }
+
+        if ($request->has('nama')) {
+            $template->nama = $request->input('nama');
+        }
+
+        $template->save();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Status template berhasil diperbarui!',
+            'data' => $template
+        ], 200);
+    }
+
+    /**
+     * 🔄 Fungsi Toggle Status (POST /api/templates/{id}/toggle-status)
+     */
+    public function toggleStatus($id)
+    {
+        $template = Template::find($id);
+
+        if (!$template) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Data template tidak ditemukan.'
+            ], 404);
+        }
+
+        $currentStatus = $template->status_aktif ?? 1;
+        $newStatus = ($currentStatus == 1 || $currentStatus === true) ? 0 : 1;
+        
+        $template->status_aktif = $newStatus;
+        $template->save();
+
+        return response()->json([
+            'success' => true,
+            'status' => 'success',
+            'new_status' => $newStatus,
+            'message' => $newStatus == 1 ? 'Template berhasil diaktifkan kembali.' : 'Template berhasil dinonaktifkan.'
         ], 200);
     }
 
@@ -187,13 +247,17 @@ class TemplateController extends Controller
     public function getLatestByJenis($jenis_dokumen_id)
     {
         $template = Template::where('jenis_dokumen_id', $jenis_dokumen_id)
+                            ->where(function($query) {
+                                $query->where('status_aktif', 1)
+                                      ->orWhereNull('status_aktif');
+                            })
                             ->latest()
                             ->first();
 
         if (!$template) {
             return response()->json([
                 'success' => false,
-                'message' => 'Belum ada file template yang diunggah untuk jenis dokumen ini.'
+                'message' => 'Belum ada file template yang diunggah/aktif untuk jenis dokumen ini.'
             ], 404);
         }
 

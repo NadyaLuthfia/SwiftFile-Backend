@@ -13,5 +13,8 @@ class Jabatan extends Model
     protected $table = 'jabatan';
 
     // 🌟 Daftarkan kolom yang boleh diisi lewat React
-    protected $fillable = ['nama_jabatan'];
+    protected $fillable = [
+        'nama_jabatan',
+        'status_aktif',
+    ];
 }

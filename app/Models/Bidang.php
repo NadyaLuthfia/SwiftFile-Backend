@@ -9,9 +9,17 @@ class Bidang extends Model
 {
     use HasFactory;
 
-    // 🌟 Kunci agar Laravel membaca tabel 'bidang' (bukan bidangs)
     protected $table = 'bidang';
+    protected $primaryKey = 'id';
 
-    // 🌟 Daftarkan kolom yang boleh diisi lewat React
-    protected $fillable = ['nama_bidang'];
+    // 🌟 Cukup gunakan status_aktif saja
+    protected $fillable = [
+        'nama_bidang',
+        'status_aktif',
+    ];
+
+    public function karyawan()
+    {
+        return $this->hasMany(Karyawan::class, 'id_bidang', 'id');
+    }
 }

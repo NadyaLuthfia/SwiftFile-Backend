@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\DokumenCetak;
 use App\Models\Template;
 use PhpOffice\PhpWord\TemplateProcessor;
+use SimpleSoftwareIO\QrCode\Facades\QrCode;
 use Carbon\Carbon;
 use ZipArchive;
 use Exception;
@@ -69,7 +70,30 @@ class DocumentGeneratorService
             $namaDokumen = $antrean->nama_dokumen ?? "{$templateMaster->nama} - {$noUrut}";
         }
 
-        $dateObj = $antrean->created_at ? Carbon::parse($antrean->created_at) : Carbon::now();
+        // =========================================================================
+        // PERBAIKAN TANGGAL: Prioritaskan ambil dari 'tanggal_input' (tanggal penuh)
+        // =========================================================================
+        $rawTanggal = $variables['tanggal_input'] ?? $variables['tanggal_dokumen'] ?? $variables['tanggal'] ?? null;
+        $dateObj = null;
+
+        if (!empty($rawTanggal)) {
+            try {
+                // Cegah angka 1-2 digit (seperti '6' atau '12') diparse langsung oleh Carbon
+                if (is_numeric($rawTanggal) && strlen((string)$rawTanggal) <= 2) {
+                    throw new Exception('Ini cuma angka hari, bukan tanggal lengkap');
+                }
+                $dateObj = Carbon::parse($rawTanggal);
+            } catch (Throwable $e) {
+                // Kalau format berantakan, kembalikan jadi null
+                $dateObj = null; 
+            }
+        }
+
+        // Kalau form tanggal kosong/error, kembali pakai tanggal sistem
+        if (!$dateObj) {
+            $dateObj = $antrean->created_at ? Carbon::parse($antrean->created_at) : Carbon::now();
+        }
+
         $tahun = $dateObj->format('Y');
         $bulanAngka = (int)$dateObj->format('n');
 
@@ -204,12 +228,59 @@ class DocumentGeneratorService
         $this->injectTorBarangVariables($templateProcessor, $variables);
 
         // =========================================================================
+        // 3.5. GENERATE & EMBED QR CODE SCAN PERSETUJUAN (${scan} / ${SCAN})
+        // =========================================================================
+        $tempQrPath = null;
+        try {
+            $namaCabang = $variables['kepala_cabang'] ?? $variables['KEPALA_CABANG'] ?? '-';
+            $namaBidang = $variables['kepala_bidang'] ?? $variables['KEPALA_BIDANG'] ?? '-';
+            $jabatanBidang = $variables['jabatan_bidang'] ?? $variables['JABATAN_BIDANG'] ?? $variables['jabatan'] ?? '-';
+
+            $teksScan = "Disetujui oleh {$namaBidang} sebagai {$jabatanBidang} dan oleh {$namaCabang} sebagai Kepala Cabang";
+
+            $tempQrPath = sys_get_temp_dir() . '/temp_qr_' . uniqid() . '.png';
+
+            if (class_exists(\SimpleSoftwareIO\QrCode\Facades\QrCode::class)) {
+                QrCode::format('png')->size(180)->margin(1)->generate($teksScan, $tempQrPath);
+            } else {
+                $qrApiUrl = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" . urlencode($teksScan);
+                $qrContent = @file_get_contents($qrApiUrl);
+                if ($qrContent) {
+                    file_put_contents($tempQrPath, $qrContent);
+                }
+            }
+
+            if ($tempQrPath && file_exists($tempQrPath)) {
+                try {
+                    $templateProcessor->setImageValue('scan', [
+                        'path'   => $tempQrPath,
+                        'width'  => 210,
+                        'height' => 210,
+                        'ratio'  => true
+                    ]);
+                } catch (Throwable $e) {}
+
+                try {
+                    $templateProcessor->setImageValue('SCAN', [
+                        'path'   => $tempQrPath,
+                        'width'  => 85,
+                        'height' => 85,
+                        'ratio'  => true
+                    ]);
+                } catch (Throwable $e) {}
+            }
+        } catch (Throwable $e) {
+            // Abaikan jika tag ${scan} tidak ada di template
+        }
+
+        // =========================================================================
         // 4. SET VALUE UNTUK VARIABEL SISA
         // =========================================================================
         $protectedKeys = [
             'no', 'nama_barang', 'barang', 'spesifikasi', 'qty', 'jumlah', 'satuan',
             'harga_satuan', 'total', 'jumlah_harga', 'barang_kiri', 'barang_kanan',
-            'foto_kiri', 'foto_kanan', 'barang_1', 'barang_2', 'rincian_barang', 'items', 'rincian', 'foto', 'photos', 'lampiran_foto'
+            'foto_kiri', 'foto_kanan', 'barang_1', 'barang_2', 'rincian_barang', 'items', 'rincian', 'foto', 'photos', 'lampiran_foto',
+            'scan', 'SCAN'
         ];
 
         foreach ($variables as $key => $value) {
@@ -236,17 +307,12 @@ class DocumentGeneratorService
             $templateProcessor->setValue($key, (string)$value);
         }
 
-        // SIMPAN FILE WORD (FOTO SUDAH AMAN & KEKUNCI DI DALAM FILE .DOCX INI)
+        // SIMPAN FILE WORD (FOTO & QR CODE SUDAH AMAN & KEKUNCI DI DALAM FILE .DOCX INI)
         $templateProcessor->saveAs($pathFile);
 
-        // =========================================================================
-        // HAPUS FOTO FISIK DI UPLOADS/ SETELAH TEREMBED KE WORD
-        // =========================================================================
-        foreach ($validPhotos as $photo) {
-            $fotoFisikPath = public_path($photo['path']);
-            if (file_exists($fotoFisikPath)) {
-                @unlink($fotoFisikPath);
-            }
+        // Bersihkan file QR sementara dari folder temp server
+        if ($tempQrPath && file_exists($tempQrPath)) {
+            @unlink($tempQrPath);
         }
 
         return 'documents/' . $namaFileFisik;
@@ -254,17 +320,11 @@ class DocumentGeneratorService
 
     public function generatePdf(DokumenCetak $antrean, int $copies = 1, string $pages = 'All', int $batasFoto = 0, int $kolomPerBaris = 4): string
     {
-        // 1. CEK FILE DOCX DULU. KALAU SUDAH ADA, PAKAI YANG ADA (TIDAK GENERATE RE-WORD!)
-        $docxRelativePath = $antrean->file_path;
-        $docxAbsPath      = $docxRelativePath ? public_path($docxRelativePath) : null;
-
-        if (!$docxAbsPath || !file_exists($docxAbsPath)) {
-            // Kalau file .docx belum pernah dibuat sama sekali, baru generate .docx 1x
-            $docxRelativePath  = $this->generate($antrean, $batasFoto, $kolomPerBaris);
-            $antrean->file_path = $docxRelativePath;
-            $antrean->save();
-            $docxAbsPath       = public_path($docxRelativePath);
-        }
+        // 1. SELALU GENERATE ULANG DOCX AGAR DATA HASIL EDIT SELALU UPDATE
+        $docxRelativePath  = $this->generate($antrean, $batasFoto, $kolomPerBaris);
+        $antrean->file_path = $docxRelativePath;
+        $antrean->save();
+        $docxAbsPath       = public_path($docxRelativePath);
 
         // 2. KONVERSI FILE WORD YANG SUDAH JADI LANGSUNG KE PDF
         $pdfDirPath  = public_path('pdfs');
@@ -348,9 +408,9 @@ class DocumentGeneratorService
 
     private function injectTorBarangVariables(TemplateProcessor $templateProcessor, array $variables): void
     {
-        $templateProcessor->setValue('nama_penyerah', $variables['nama_penyerah'] ?? $variables['penyerah'] ?? '');
+        $templateProcessor->setValue('nama_peninjau', $variables['nama_peninjau'] ?? $variables['peninjau'] ?? $variables['nama_penyerah'] ?? '');
         $templateProcessor->setValue('bidang1', $variables['bidang1'] ?? $variables['bidang_penyerah'] ?? '');
-        $templateProcessor->setValue('nama_penerima', $variables['nama_penerima'] ?? $variables['penerima'] ?? '');
+        $templateProcessor->setValue('nama_penyetuju', $variables['nama_penyetuju'] ?? $variables['penyetuju'] ?? $variables['nama_penerima'] ?? '');
         $templateProcessor->setValue('bidang2', $variables['bidang2'] ?? $variables['bidang_penerima'] ?? '');
     }
 

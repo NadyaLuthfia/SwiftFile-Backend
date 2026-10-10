@@ -24,6 +24,7 @@ class Dokumen extends Model
         'penerima_id',
         'catatan',
         'kolom_tambahan',
+        'history_perubahan',
         'file_word',
         'tanggal_cetak',
         'status_aktif'
